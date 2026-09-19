@@ -1,0 +1,22 @@
+# Core
+python-dotenv>=1.0.0
+pandas>=2.0.0
+PyYAML>=6.0
+tabulate>=0.9.0
+
+# UI
+streamlit>=1.32.0
+
+# Snowflake
+snowflake-connector-python>=3.7.0
+
+# Tests
+pytest>=8.0.0
+
+# ---------------------------------------------------------------------
+# MSSQL (optional — install only if you point a test case at SQL Server).
+# pymssql is the easy path: one wheel, no system driver needed.
+#   pip install pymssql
+# pyodbc also works if you already have the Microsoft ODBC driver:
+#   pip install pyodbc
+# ---------------------------------------------------------------------

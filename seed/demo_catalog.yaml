@@ -1,0 +1,419 @@
+# =====================================================================
+# demo_catalog.yaml — the seed dataset for `python -m src.cli seed-catalog`.
+#
+# This file is a STARTING POINT, not the runtime source of truth. Once
+# seeded, every test case lives in the DQ_TEST_CASE repository table and is
+# created, edited, moved and deleted from the app. Folder structure is
+# whatever the user builds; these are just sensible defaults.
+#
+# test_type decides what "passing" means:
+#   SQL_ROWCOUNT           zero rows returned = PASS   (rule checks)
+#   SOURCE_TARGET_COMPARE  match on key_columns, diff compare_columns
+#   ROW_COUNT_MATCH        source count vs target count
+#   STATUS_COLUMN          query returns STATUS; any non-PASS row fails
+#   INFORMATIONAL          always PASS; records rows for reporting
+# =====================================================================
+project:
+  name: Insurance Policy & Claim
+  description: >-
+    Data quality and regression automation for the policy/claim pipeline:
+    Staging -> Transformation -> Curated.
+
+folders:
+  - path: /Staging
+    description: Landing-layer rule checks against the incoming feed.
+  - path: /Transformation
+    description: Mapping and derivation rules between staging and transformation.
+  - path: /Source-to-Target
+    description: Row-by-row transformation vs curated reconciliation.
+  - path: /Linkage
+    description: Referential integrity between policies and claims.
+  - path: /Incremental
+    description: Watermark-bounded incremental load validation.
+  - path: /Historical
+    description: Date-range reconciliation for late-arriving changes.
+  - path: /Regression
+    type: REGRESSION
+    description: >-
+      Saved regression scripts. Corrected defects are re-validated from here
+      until the whole folder reports PASS.
+
+test_cases:
+  # ------------------------------------------------------------- Staging
+  - folder: /Staging
+    name: File-to-stage row count reconciliation
+    description: Rows recorded for the batch must equal rows landed in staging.
+    test_type: ROW_COUNT_MATCH
+    scope: GENERIC
+    entity: All
+    layer: Staging
+    severity: High
+    source_sql: |
+      SELECT SOURCE_ROWS FROM DQ_BATCH_METADATA WHERE BATCH_ID = :batch_id
+    target_sql: |
+      SELECT (SELECT COUNT(*) FROM STG_CUSTOMER WHERE BATCH_ID = :batch_id)
+           + (SELECT COUNT(*) FROM STG_POLICY   WHERE BATCH_ID = :batch_id)
+           + (SELECT COUNT(*) FROM STG_CLAIM    WHERE BATCH_ID = :batch_id) AS STAGED_ROWS
+
+  - folder: /Staging
+    name: Policy ID is mandatory
+    description: POLICY_ID is the business key and can never be null or blank.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Policy
+    layer: Staging
+    severity: Critical
+    validation_sql: |
+      SELECT POLICY_ID AS BUSINESS_KEY,
+             'POLICY_ID' AS COLUMN_NAME,
+             'a non-null policy id' AS EXPECTED_VALUE,
+             COALESCE(POLICY_ID, '<NULL>') AS ACTUAL_VALUE,
+             'Policy id is null or blank' AS FAILURE_REASON
+      FROM STG_POLICY
+      WHERE BATCH_ID = :batch_id
+        AND (POLICY_ID IS NULL OR TRIM(POLICY_ID) = '')
+
+  - folder: /Staging
+    name: Duplicate policy check
+    description: A policy id must appear exactly once per batch.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Policy
+    layer: Staging
+    severity: Critical
+    validation_sql: |
+      SELECT POLICY_ID AS BUSINESS_KEY,
+             'POLICY_ID' AS COLUMN_NAME,
+             '1' AS EXPECTED_VALUE,
+             TO_VARCHAR(COUNT(*)) AS ACTUAL_VALUE,
+             'Policy id appears more than once in the batch' AS FAILURE_REASON
+      FROM STG_POLICY
+      WHERE BATCH_ID = :batch_id
+      GROUP BY POLICY_ID
+      HAVING COUNT(*) > 1
+
+  - folder: /Staging
+    name: Claim references an existing policy
+    description: Every staged claim must point at a policy in the same batch.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Claim
+    layer: Staging
+    severity: Critical
+    validation_sql: |
+      SELECT C.CLAIM_ID AS BUSINESS_KEY,
+             'POLICY_ID' AS COLUMN_NAME,
+             'an existing policy id' AS EXPECTED_VALUE,
+             C.POLICY_ID AS ACTUAL_VALUE,
+             'Claim references a policy that is not in the batch' AS FAILURE_REASON
+      FROM STG_CLAIM C
+      LEFT JOIN STG_POLICY P
+             ON P.POLICY_ID = C.POLICY_ID AND P.BATCH_ID = C.BATCH_ID
+      WHERE C.BATCH_ID = :batch_id AND P.POLICY_ID IS NULL
+
+  - folder: /Staging
+    name: Approved amount within claim amount
+    description: Approved amount must be between zero and the claimed amount.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Claim
+    layer: Staging
+    severity: High
+    validation_sql: |
+      SELECT CLAIM_ID AS BUSINESS_KEY,
+             'APPROVED_AMOUNT' AS COLUMN_NAME,
+             '0 .. ' || TO_VARCHAR(CLAIM_AMOUNT) AS EXPECTED_VALUE,
+             TO_VARCHAR(APPROVED_AMOUNT) AS ACTUAL_VALUE,
+             'Approved amount is negative or exceeds the claim amount' AS FAILURE_REASON
+      FROM STG_CLAIM
+      WHERE BATCH_ID = :batch_id
+        AND (APPROVED_AMOUNT < 0 OR APPROVED_AMOUNT > CLAIM_AMOUNT)
+
+  # ------------------------------------------------------ Transformation
+  - folder: /Transformation
+    name: Policy type decode
+    description: POLICY_TYPE code must decode to the mapped description.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Policy
+    layer: Transformation
+    severity: High
+    validation_sql: |
+      SELECT S.POLICY_ID AS BUSINESS_KEY,
+             'POLICY_TYPE_DESC' AS COLUMN_NAME,
+             CASE UPPER(TRIM(S.POLICY_TYPE))
+                 WHEN 'AUTO'   THEN 'Automobile'
+                 WHEN 'HOME'   THEN 'Home Insurance'
+                 WHEN 'HEALTH' THEN 'Health Insurance'
+                 WHEN 'LIFE'   THEN 'Life Insurance'
+                 ELSE 'Unknown'
+             END AS EXPECTED_VALUE,
+             T.POLICY_TYPE_DESC AS ACTUAL_VALUE,
+             'Policy type was not decoded per the mapping rule' AS FAILURE_REASON
+      FROM STG_POLICY S
+      JOIN TRN_POLICY T ON T.POLICY_ID = S.POLICY_ID AND T.BATCH_ID = S.BATCH_ID
+      WHERE S.BATCH_ID = :batch_id
+        AND T.POLICY_TYPE_DESC <> CASE UPPER(TRIM(S.POLICY_TYPE))
+                 WHEN 'AUTO'   THEN 'Automobile'
+                 WHEN 'HOME'   THEN 'Home Insurance'
+                 WHEN 'HEALTH' THEN 'Health Insurance'
+                 WHEN 'LIFE'   THEN 'Life Insurance'
+                 ELSE 'Unknown'
+             END
+
+  - folder: /Transformation
+    name: Policy term validity
+    description: A policy must expire after it is issued, and the derived term must agree.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Policy
+    layer: Transformation
+    severity: High
+    validation_sql: |
+      SELECT T.POLICY_ID AS BUSINESS_KEY,
+             'POLICY_TERM_DAYS' AS COLUMN_NAME,
+             TO_VARCHAR(DATEDIFF(day, T.ISSUE_DATE, T.EXPIRY_DATE)) AS EXPECTED_VALUE,
+             TO_VARCHAR(T.POLICY_TERM_DAYS) AS ACTUAL_VALUE,
+             'Expiry precedes issue date, or the derived term is wrong' AS FAILURE_REASON
+      FROM TRN_POLICY T
+      WHERE T.BATCH_ID = :batch_id
+        AND (T.EXPIRY_DATE < T.ISSUE_DATE
+             OR T.POLICY_TERM_DAYS <> DATEDIFF(day, T.ISSUE_DATE, T.EXPIRY_DATE))
+
+  - folder: /Transformation
+    name: Claim ratio derivation
+    description: CLAIM_RATIO must equal approved / claimed, and sit within 0..1.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Claim
+    layer: Transformation
+    severity: High
+    validation_sql: |
+      SELECT S.CLAIM_ID AS BUSINESS_KEY,
+             'CLAIM_RATIO' AS COLUMN_NAME,
+             TO_VARCHAR(ROUND(COALESCE(S.APPROVED_AMOUNT / NULLIF(S.CLAIM_AMOUNT, 0), 0), 4)) AS EXPECTED_VALUE,
+             TO_VARCHAR(T.CLAIM_RATIO) AS ACTUAL_VALUE,
+             'Claim ratio does not match approved / claimed, or is outside 0..1' AS FAILURE_REASON
+      FROM STG_CLAIM S
+      JOIN TRN_CLAIM T ON T.CLAIM_ID = S.CLAIM_ID AND T.BATCH_ID = S.BATCH_ID
+      WHERE S.BATCH_ID = :batch_id
+        AND (ABS(COALESCE(T.CLAIM_RATIO, 0)
+                 - ROUND(COALESCE(S.APPROVED_AMOUNT / NULLIF(S.CLAIM_AMOUNT, 0), 0), 4)) > 0.0001
+             OR T.CLAIM_RATIO NOT BETWEEN 0 AND 1)
+
+  - folder: /Transformation
+    name: Email standardisation
+    description: Email must be lower-cased, trimmed and structurally valid.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Customer
+    layer: Transformation
+    severity: Medium
+    validation_sql: |
+      SELECT CUSTOMER_ID AS BUSINESS_KEY,
+             'EMAIL' AS COLUMN_NAME,
+             LOWER(TRIM(EMAIL)) AS EXPECTED_VALUE,
+             EMAIL AS ACTUAL_VALUE,
+             'Email is not lower-cased/trimmed, or is not a valid address' AS FAILURE_REASON
+      FROM TRN_CUSTOMER
+      WHERE BATCH_ID = :batch_id
+        AND (EMAIL <> LOWER(TRIM(EMAIL))
+             OR (EMAIL IS NOT NULL AND NOT EMAIL LIKE '%@%.%'))
+
+  # ---------------------------------------------------- Source-to-Target
+  - folder: /Source-to-Target
+    name: Policy transformation vs curated
+    description: >-
+      Row-by-row reconciliation of TRN_POLICY against POLICY_MASTER. Reports
+      missing records, unexpected records and per-column value mismatches.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: SOURCE_TO_TARGET
+    entity: Policy
+    layer: Curated
+    severity: Critical
+    key_columns: POLICY_ID
+    compare_columns: POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT, CUSTOMER_ID
+    source_sql: |
+      SELECT POLICY_ID,
+             CUSTOMER_ID,
+             POLICY_TYPE_DESC   AS POLICY_TYPE,
+             POLICY_STATUS_DESC AS POLICY_STATUS,
+             PREMIUM_AMOUNT
+      FROM TRN_POLICY
+      WHERE BATCH_ID = :batch_id
+    target_sql: |
+      SELECT POLICY_ID, CUSTOMER_ID, POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT
+      FROM POLICY_MASTER
+      WHERE POLICY_ID IN (SELECT POLICY_ID FROM TRN_POLICY WHERE BATCH_ID = :batch_id)
+
+  - folder: /Source-to-Target
+    name: Claim transformation vs curated
+    description: Row-by-row reconciliation of TRN_CLAIM against CLAIM_MASTER.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: SOURCE_TO_TARGET
+    entity: Claim
+    layer: Curated
+    severity: Critical
+    key_columns: CLAIM_ID
+    compare_columns: POLICY_ID, CLAIM_STATUS, CLAIM_AMOUNT, APPROVED_AMOUNT, CLAIM_RATIO
+    source_sql: |
+      SELECT CLAIM_ID,
+             POLICY_ID,
+             CLAIM_STATUS_DESC AS CLAIM_STATUS,
+             CLAIM_AMOUNT,
+             APPROVED_AMOUNT,
+             CLAIM_RATIO
+      FROM TRN_CLAIM
+      WHERE BATCH_ID = :batch_id
+    target_sql: |
+      SELECT CLAIM_ID, POLICY_ID, CLAIM_STATUS, CLAIM_AMOUNT, APPROVED_AMOUNT, CLAIM_RATIO
+      FROM CLAIM_MASTER
+      WHERE CLAIM_ID IN (SELECT CLAIM_ID FROM TRN_CLAIM WHERE BATCH_ID = :batch_id)
+
+  - folder: /Source-to-Target
+    name: Customer 360 aggregate reconciliation
+    description: Curated customer aggregates must agree with the curated detail they summarise.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: SOURCE_TO_TARGET
+    entity: Customer
+    layer: Curated
+    severity: High
+    key_columns: CUSTOMER_ID
+    compare_columns: TOTAL_PREMIUM, TOTAL_CLAIMS
+    tolerance: 0.01
+    source_sql: |
+      SELECT C.CUSTOMER_ID,
+             COALESCE(POL.TOTAL_PREMIUM, 0) AS TOTAL_PREMIUM,
+             COALESCE(CLM.CLAIM_COUNT, 0)   AS TOTAL_CLAIMS
+      FROM TRN_CUSTOMER C
+      LEFT JOIN (SELECT CUSTOMER_ID, SUM(PREMIUM_AMOUNT) AS TOTAL_PREMIUM
+                 FROM POLICY_MASTER GROUP BY CUSTOMER_ID) POL
+             ON POL.CUSTOMER_ID = C.CUSTOMER_ID
+      LEFT JOIN (SELECT P.CUSTOMER_ID, COUNT(CM.CLAIM_ID) AS CLAIM_COUNT
+                 FROM POLICY_MASTER P
+                 JOIN CLAIM_MASTER CM ON CM.POLICY_ID = P.POLICY_ID
+                 GROUP BY P.CUSTOMER_ID) CLM
+             ON CLM.CUSTOMER_ID = C.CUSTOMER_ID
+      WHERE C.BATCH_ID = :batch_id
+    target_sql: |
+      SELECT CUSTOMER_ID, TOTAL_PREMIUM, TOTAL_CLAIMS
+      FROM CUSTOMER_360
+      WHERE CUSTOMER_ID IN (SELECT CUSTOMER_ID FROM TRN_CUSTOMER WHERE BATCH_ID = :batch_id)
+
+  # ------------------------------------------------------------- Linkage
+  - folder: /Linkage
+    name: No orphan claims in curated
+    description: Every curated claim must resolve to a curated policy.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Policy-Claim
+    layer: Curated
+    severity: Critical
+    validation_sql: |
+      SELECT C.CLAIM_ID AS BUSINESS_KEY,
+             'POLICY_ID' AS COLUMN_NAME,
+             'a policy present in POLICY_MASTER' AS EXPECTED_VALUE,
+             C.POLICY_ID AS ACTUAL_VALUE,
+             'Curated claim points at a policy that does not exist' AS FAILURE_REASON
+      FROM CLAIM_MASTER C
+      LEFT JOIN POLICY_MASTER P ON P.POLICY_ID = C.POLICY_ID
+      WHERE C.CLAIM_ID IN (SELECT CLAIM_ID FROM TRN_CLAIM WHERE BATCH_ID = :batch_id)
+        AND P.POLICY_ID IS NULL
+
+  - folder: /Linkage
+    name: Claim date inside policy coverage
+    description: A claim must fall between its policy's issue and expiry dates.
+    test_type: SQL_ROWCOUNT
+    scope: GENERIC
+    entity: Policy-Claim
+    layer: Curated
+    severity: High
+    validation_sql: |
+      SELECT C.CLAIM_ID AS BUSINESS_KEY,
+             'CLAIM_DATE' AS COLUMN_NAME,
+             TO_VARCHAR(P.ISSUE_DATE) || ' .. ' || TO_VARCHAR(P.EXPIRY_DATE) AS EXPECTED_VALUE,
+             TO_VARCHAR(C.CLAIM_DATE) AS ACTUAL_VALUE,
+             'Claim date falls outside the policy coverage window' AS FAILURE_REASON
+      FROM CLAIM_MASTER C
+      JOIN POLICY_MASTER P ON P.POLICY_ID = C.POLICY_ID
+      WHERE C.CLAIM_ID IN (SELECT CLAIM_ID FROM TRN_CLAIM WHERE BATCH_ID = :batch_id)
+        AND (C.CLAIM_DATE < P.ISSUE_DATE OR C.CLAIM_DATE > P.EXPIRY_DATE)
+
+  # --------------------------------------------------------- Incremental
+  - folder: /Incremental
+    name: Incremental watermark boundary
+    description: >-
+      Every record loaded by the batch must fall inside the committed
+      watermark window — nothing before it, nothing after it.
+    test_type: SQL_ROWCOUNT
+    scope: INCREMENTAL
+    entity: Policy
+    layer: Transformation
+    severity: Critical
+    validation_sql: |
+      SELECT T.POLICY_ID AS BUSINESS_KEY,
+             'RECORD_EFFECTIVE_TS' AS COLUMN_NAME,
+             TO_VARCHAR(W.PREVIOUS_WATERMARK) || ' .. ' || TO_VARCHAR(W.BATCH_HIGH_WATERMARK) AS EXPECTED_VALUE,
+             TO_VARCHAR(T.RECORD_EFFECTIVE_TS) AS ACTUAL_VALUE,
+             'Record sits outside the committed incremental window' AS FAILURE_REASON
+      FROM TRN_POLICY T
+      CROSS JOIN DQ_WATERMARK W
+      WHERE W.PROCESS_NAME = 'POLICY_CURATED_LOAD'
+        AND T.BATCH_ID = :batch_id
+        AND (T.RECORD_EFFECTIVE_TS < W.PREVIOUS_WATERMARK
+             OR T.RECORD_EFFECTIVE_TS > W.BATCH_HIGH_WATERMARK)
+
+  - folder: /Incremental
+    name: Watermark status report
+    description: Current watermark position per process — reporting only, never fails.
+    test_type: INFORMATIONAL
+    scope: INCREMENTAL
+    entity: All
+    layer: Control
+    severity: Low
+    is_regression: false
+    validation_sql: |
+      SELECT PROCESS_NAME, PREVIOUS_WATERMARK, BATCH_HIGH_WATERMARK,
+             LAST_BATCH_ID, ROWS_PROCESSED, LOAD_STATUS, VALIDATION_STATUS, UPDATED_TS
+      FROM DQ_WATERMARK
+      ORDER BY PROCESS_NAME
+
+  # ---------------------------------------------------------- Historical
+  - folder: /Historical
+    name: Historical policy reconciliation (date range)
+    description: >-
+      Re-reconciles transformation against curated for records effective in a
+      chosen date window. Set history_start / history_end when running it —
+      this is the late-arriving-change check.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: HISTORICAL
+    entity: Policy
+    layer: Curated
+    severity: High
+    key_columns: POLICY_ID
+    compare_columns: POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT
+    param_defaults:
+      history_start: '2026-07-01'
+      history_end: '2026-12-31'
+    source_sql: |
+      SELECT POLICY_ID,
+             POLICY_TYPE_DESC   AS POLICY_TYPE,
+             POLICY_STATUS_DESC AS POLICY_STATUS,
+             PREMIUM_AMOUNT
+      FROM TRN_POLICY
+      WHERE RECORD_EFFECTIVE_TS >= :history_start
+        AND RECORD_EFFECTIVE_TS <  DATEADD(day, 1, :history_end)
+    target_sql: |
+      SELECT POLICY_ID, POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT
+      FROM POLICY_MASTER
+      WHERE LAST_UPDATED_TS >= :history_start
+        AND LAST_UPDATED_TS <  DATEADD(day, 1, :history_end)
+
+# Test cases copied into /Regression when the catalog is seeded. This is the
+# "save a regression validation script in the Regression folder" step — the
+# copies are independent saved test cases with their own ids.
+regression_copies:
+  - Policy transformation vs curated
+  - Claim transformation vs curated
+  - No orphan claims in curated
+  - Claim date inside policy coverage

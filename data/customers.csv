@@ -1,0 +1,31 @@
+CUSTOMER_ID,CUSTOMER_NAME,EMAIL,PHONE_NUMBER,CITY,LAST_UPDATED_TS
+C1001,Nisha Reddy,nisha.reddy@example.com,+917107420369,Hyderabad,2026-08-17 04:52:00
+C1002,Ramesh Reddy,ramesh.reddy@example.com,+919906402157,Jaipur,2026-08-26 17:33:00
+C1003,Rahul Nair,rahul.nair@example.com,+917402418010,Pune,2026-08-17 19:22:00
+C1004,Aditi Bhat,aditi.bhat@example.com,+917854001193,Jaipur,2026-08-06 04:32:00
+C1005,Lakshmi Gupta,lakshmi.gupta@example.com,+917027911967,Bengaluru,2026-07-18 22:39:00
+C1006,Divya Menon,divya.menon@example.com,+917924765563,Delhi,2026-08-26 09:36:00
+C1007,Sanjay Bose,  SANJAY.BOSE@Example.COM  ,+918477278577,Kochi,2026-08-16 10:14:00
+C1008,Pooja Bhat,pooja.bhat@example.com,+917536124280,Kolkata,2026-08-26 18:42:00
+C1009,Kavya Kumar,kavya.kumar@example.com,+919656522106,Delhi,2026-07-27 05:15:00
+C1010,Kaviya Sharma,kaviya.sharma@example.com,+919840104345,Pune,2026-08-14 09:06:00
+C1011,Vikram Subramaniam,vikram.subramaniam@example.com,+917433797840,Kolkata,2026-08-14 21:20:00
+C1012,Kavya Bose,kavya.bose@example.com,+917698594025,Delhi,2026-08-10 05:18:00
+C1013,Divya Pandey,divya.pandey@example.com,+919935814872,Mumbai,2026-07-24 15:50:00
+C1014,Manoj Mukherjee,manoj.mukherjee@example.com,+918051454923,Bengaluru,2026-08-02 23:43:00
+C1015,Harish Kumar,harish.kumar@example.com,+919955633092,Jaipur,2026-08-17 14:40:00
+C1016,Kavya Sinha,kavya.sinha@example.com,+917240251661,Pune,2026-08-30 01:35:00
+C1017,Divya Iyer,divya.iyer@example.com,+917906164396,Kochi,2026-07-18 01:47:00
+C1018,Nisha Kapoor,nisha.kapoor@example.com,+918699226064,Ahmedabad,2026-08-23 03:52:00
+C1019,Vikram Mukherjee,  VIKRAM.MUKHERJEE@Example.COM  ,+919411057787,Jaipur,2026-08-15 12:23:00
+C1020,Suresh Prasad,suresh.prasad@example.com,+919506254832,Kolkata,2026-08-09 04:52:00
+C1021,Ishita Kapoor,ishita.kapoor@example.com,+917390452952,Chennai,2026-08-25 07:20:00
+C1022,Arjun Chatterjee,arjun.chatterjee@example.com,+919922644564,Kolkata,2026-07-25 09:36:00
+C1023,Neha Agarwal,neha.agarwal@example.com,+919010258946,Jaipur,2026-08-15 18:05:00
+C1024,Aditi Singh,aditi.singh@example.com,+917491995979,Jaipur,2026-08-14 15:39:00
+C1025,Sanjay Das,sanjay.das@example.com,+918867302554,Bengaluru,2026-08-03 11:14:00
+C1026,Shreya Mukherjee,shreya.mukherjee@example.com,+918131247330,Jaipur,2026-08-20 19:02:00
+C1027,Sanjay Subramaniam,sanjay.subramaniam@example.com,+919685643886,Hyderabad,2026-07-22 19:22:00
+C1028,Priya Menon,priya.menon@example.com,+918605947756,Bengaluru,2026-07-28 19:02:00
+C1029,Aditi Agarwal,aditi.agarwal@example.com,+918392239675,Ahmedabad,2026-08-31 08:01:00
+C1030,Rohan Prasad,rohan.prasad@example.com,+918320763135,Pune,2026-08-29 04:04:00
