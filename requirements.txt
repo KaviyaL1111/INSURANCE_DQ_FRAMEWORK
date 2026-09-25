@@ -5,10 +5,14 @@ PyYAML>=6.0
 tabulate>=0.9.0
 
 # UI
-streamlit>=1.32.0
+streamlit>=1.40.0
 
 # Snowflake
 snowflake-connector-python>=3.7.0
+
+# Flat files — CSV / TSV / JSON work out of the box. Excel (.xlsx) needs openpyxl;
+# Parquet needs pyarrow (pip install pyarrow) if you use it.
+openpyxl>=3.1.0
 
 # Tests
 pytest>=8.0.0

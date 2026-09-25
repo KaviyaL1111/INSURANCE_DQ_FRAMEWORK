@@ -1,7 +1,8 @@
 # Data Validation & Regression Management
 
 A Python application for creating, organising, executing and **re-running**
-data validation test cases across Snowflake and MSSQL.
+data validation test cases across Snowflake, MSSQL and flat files
+(CSV / Excel / JSON / Parquet).
 
 Analysts normally lose hours after a validation failure: digging out which
 test cases ran, fixing the data, then working out what to re-execute. This
@@ -27,7 +28,7 @@ MFA, and how to keep trial credits down.
 ```bash
 python -m src.cli doctor      # confirm the connection
 python -m src.cli demo        # the entire walkthrough, end to end
-streamlit run streamlit_app/app.py
+streamlit run streamlit_app/DQ_Workspace.py
 ```
 
 ---
@@ -52,6 +53,7 @@ streamlit run streamlit_app/app.py
 | Historical validation | `/Historical` folder — date-range parameters |
 | Incremental load validation | `/Incremental` folder — `DQ_WATERMARK` bounds |
 | Snowflake + MSSQL | `src/connectors/` — see [sql/mssql/README.md](sql/mssql/README.md) |
+| Flat files (CSV, TSV, Excel, JSON, Parquet) | `flatfile` connection · `Flat Files` page — see [below](#flat-file-connectivity) |
 
 ---
 
@@ -121,11 +123,58 @@ it once, not three times.
 
 ---
 
+## Flat-file connectivity
+
+A folder of files is exposed as a read-only connection called `flatfile`.
+Every supported file becomes a table named after the file, and test cases
+query it with the same `:named` SQL as any other connection:
+
+| File | Table |
+|---|---|
+| `claims.csv` | `CLAIMS` |
+| `motor book.xlsx` with one sheet | `MOTOR_BOOK` |
+| `motor book.xlsx` with sheets *Q1*, *Q2* | `MOTOR_BOOK_Q1`, `MOTOR_BOOK_Q2` |
+| `2026-feed.psv` | `T_2026_FEED` |
+
+Supported: `.csv .tsv .txt .psv .dat` (delimiter detected per file),
+`.xlsx .xls` (needs `openpyxl`), `.json .jsonl`, `.parquet` (needs `pyarrow`).
+The folder defaults to `data/`; set `FLATFILE_DIR` and the other `FLATFILE_*`
+options in `.env` to change it (see `.env.example`).
+
+Set a test case's **source** (or target) connection to `flatfile` to
+reconcile a landed file against the table it was loaded into; the seeded
+*Claims landing file vs staging* test does exactly that for `data/claims.csv`
+vs `STG_CLAIM`. The comparator treats ISO date text in a file
+(`2024-10-31`) as equal to the matching `DATE`/`TIMESTAMP` value.
+
+The **Flat Files** page lets you upload files, browse and profile each table
+(nulls, distinct values, candidate keys), run ad-hoc SQL against them, and
+generate a file-vs-table reconciliation test case without writing SQL.
+Files are re-read automatically when they change. `python -m src.cli
+--connection flatfile doctor` lists what the connection sees.
+
+Queries against files run in SQLite, so use SQLite syntax in the flat-file
+side of a test case. The flat-file connection can't hold the repository.
+
+---
+
+## Time zone
+
+Every timestamp is Indian Standard Time (UTC+05:30): created/updated times,
+execution and failure times, run and batch ids, the `:run_date` / `:run_ts`
+parameters, and the history date filter. Python code gets the time from
+`src.config.now_ist()`. Snowflake sessions are opened with
+`TIMEZONE = 'Asia/Kolkata'`, so `CURRENT_TIMESTAMP()` and every
+`DEFAULT CURRENT_TIMESTAMP()` column are IST too. Values are stored in
+`TIMESTAMP_NTZ` columns as IST wall-clock time.
+
+---
+
 ## Project layout
 
 ```
 src/
-  connectors/          Snowflake + MSSQL drivers behind one interface
+  connectors/          Snowflake, MSSQL and flat-file drivers behind one interface
   config.py            connection profiles from environment variables
   repository.py        projects, folders, test cases, versioning
   history.py           execution log, failure log, regression runs
@@ -135,21 +184,22 @@ src/
   seed.py              loads seed/demo_catalog.yaml into the repository
   cli.py               command line
 streamlit_app/
-  app.py               Projects & Folders
+  DQ_Workspace.py      Projects & Folders (home)
   pages/1_Test_Cases.py        browse, author, edit, run
   pages/2_Execution_History.py date filter, checkboxes, rerun
   pages/3_Dashboard.py         current state, mismatch detail, CSV export
   pages/4_Demo_Pipeline.py     drive the sample pipeline from the browser
+  pages/5_Flat_Files.py        upload, browse, profile and query files; build file tests
 sql/
   bootstrap_snowflake.sql        one-time: database + warehouse
   00_metadata_repository_ddl.sql the repository control tables
   01_ddl_create_all_tables.sql   the insurance demo tables
   02..06_*.sql                   load, transform, merge, corrupt, correct
   mssql/                         T-SQL mirror + how to enable MSSQL
-seed/demo_catalog.yaml   17 starter test cases across 7 folders
+seed/demo_catalog.yaml   18 starter test cases across 7 folders
 data/*.csv               the demo dataset (source of truth for 02_*.sql)
 tools/                   regenerate the load SQL from the CSVs
-tests/                   107 tests, no database required
+tests/                   144 tests, no database required
 docs/SNOWFLAKE_SETUP.md  setup for a new trial account
 ```
 
@@ -163,7 +213,7 @@ The brief's Notes section, automated:
 python -m src.cli demo
 ```
 
-It creates the schema, seeds 17 test cases across 7 folders, loads
+It creates the schema, seeds 18 test cases across 7 folders, loads
 30 customers / 40 policies / 50 claims through
 `Staging → Transformation → Curated`, injects three defects, validates,
 shows the failed records with mismatch detail, corrects them, reruns the
@@ -221,7 +271,7 @@ detail in the terminal.
 pytest -q
 ```
 
-107 tests run against an in-memory SQLite database through the same
+144 tests run against an in-memory SQLite database through the same
 `Connector` interface, so the repository, engine and full
 corrupt → detect → correct → rerun cycle are all verified without needing
 credentials. `tests/test_integration_snowflake.py` exercises the real

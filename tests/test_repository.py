@@ -181,12 +181,12 @@ class TestSeeding:
         from src.seed import seed_catalog
         summary = seed_catalog(repo=repo)
         assert summary["folders"] == 7
-        assert summary["created"] == 17
+        assert summary["created"] == 18
         assert summary["regression_copies"] == 4
 
         project = repo.find_project_by_name(summary["project"])
         pid = project["PROJECT_ID"]
-        assert len(repo.list_test_cases(project_id=pid)) == 21   # 17 + 4 copies
+        assert len(repo.list_test_cases(project_id=pid)) == 22   # 18 + 4 copies
 
         regression = repo.find_folder_by_path(pid, "/Regression")
         assert regression["FOLDER_TYPE"] == "REGRESSION"
@@ -197,10 +197,10 @@ class TestSeeding:
         seed_catalog(repo=repo)
         second = seed_catalog(repo=repo)
         assert second["created"] == 0
-        assert second["updated"] == 17
+        assert second["updated"] == 18
         assert second["regression_copies"] == 0
         pid = repo.find_project_by_name(second["project"])["PROJECT_ID"]
-        assert len(repo.list_test_cases(project_id=pid)) == 21
+        assert len(repo.list_test_cases(project_id=pid)) == 22
 
     def test_seeded_test_cases_declare_their_parameters(self, repo):
         from src.seed import seed_catalog

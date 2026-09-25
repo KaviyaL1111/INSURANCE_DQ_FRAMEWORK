@@ -127,7 +127,7 @@ If it fails, jump to Troubleshooting at the bottom.
 
 ## 7. Run it
 
-**Everything at once** — creates tables, seeds 17 test cases across 7 folders,
+**Everything at once** — creates tables, seeds 18 test cases across 7 folders,
 loads the data, injects 3 defects, validates, corrects, reruns:
 
 ```bash
@@ -137,7 +137,7 @@ python -m src.cli demo
 **The web app:**
 
 ```bash
-streamlit run streamlit_app/app.py
+streamlit run streamlit_app/DQ_Workspace.py
 ```
 
 A browser tab opens at `http://localhost:8501`. Stop it with `Ctrl+C`.
@@ -158,7 +158,7 @@ The left sidebar has five pages:
 pytest -q
 ```
 
-107 should pass, 5 skip.
+144 should pass, 5 skip.
 
 ---
 
@@ -190,7 +190,7 @@ Run `python -m src.cli init`, then `python -m src.cli seed-catalog`.
 The virtual environment is not active. Re-run the `activate` line from step 2.
 
 **Port 8501 already in use**
-`streamlit run streamlit_app/app.py --server.port 8502`
+`streamlit run streamlit_app/DQ_Workspace.py --server.port 8502`
 
 ---
 

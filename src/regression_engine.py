@@ -191,15 +191,19 @@ class RegressionEngine:
         return outcome
 
     def run_full_suite(self, project_id: str, params: dict | None = None,
-                       batch_id: str = DEFAULT_BATCH_ID, on_progress=None) -> RegressionOutcome:
+                       batch_id: str = DEFAULT_BATCH_ID, on_progress=None,
+                       regression_only: bool = False) -> RegressionOutcome:
         """
-        Every regression-eligible test case in the project, in folder order.
+        Every active test case in the project, in folder order — the same set
+        the project's test-case count and `run --all` cover. Pass
+        regression_only=True to skip the ones not marked "Include in
+        regression suite" (e.g. informational reports).
 
         Folder order comes from FOLDER_PATH, so the suite naturally runs
         Staging before Transformation before Source-to-Target — no separate
         hardcoded ordering list to drift out of date.
         """
-        rows = self.repo.list_test_cases(project_id=project_id, regression_only=True)
+        rows = self.repo.list_test_cases(project_id=project_id, regression_only=regression_only)
         cases = self.repo.get_test_cases([r["TEST_CASE_ID"] for r in rows])
         outcome = RegressionOutcome(run_id=new_run_id())
         outcome.regression_id = self.history.start_regression_run(

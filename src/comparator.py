@@ -10,6 +10,7 @@ asks for: expected value, actual value, and why it failed.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -21,6 +22,9 @@ EXTRA_IN_TARGET = "EXTRA_IN_TARGET"
 VALUE_MISMATCH = "VALUE_MISMATCH"
 DUPLICATE_KEY = "DUPLICATE_KEY"
 ROW_COUNT_MISMATCH = "ROW_COUNT_MISMATCH"
+
+# Dates and timestamps as flat files (and SQLite) spell them: 2024-10-31, 2024-10-31 04:36:00
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?")
 
 
 @dataclass
@@ -70,7 +74,16 @@ def normalise(value, tolerance: float = 0.0):
     try:
         return Decimal(s).normalize()
     except (InvalidOperation, ValueError):
-        return s
+        pass
+    # So is an ISO date string and the DATE/TIMESTAMP it spells — which is how
+    # a CSV column compares equal to the Snowflake column it was loaded into.
+    if _ISO_DATE_RE.fullmatch(s):
+        try:
+            return date.fromisoformat(s) if len(s) == 10 \
+                else datetime.fromisoformat(s).replace(microsecond=0)
+        except ValueError:
+            pass
+    return s
 
 
 def values_equal(a, b, tolerance: float = 0.0) -> bool:

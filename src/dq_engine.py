@@ -17,10 +17,9 @@ applying it to a reconciliation report made those tests impossible to pass.
 from __future__ import annotations
 
 import time
-from datetime import date, datetime
 
 from src.comparator import compare_result_sets, compare_row_counts
-from src.config import DEFAULT_BATCH_ID, DEFAULT_CONNECTION, DEFAULT_USER
+from src.config import DEFAULT_BATCH_ID, DEFAULT_CONNECTION, DEFAULT_USER, now_ist
 from src.connectors import get_connector
 from src.history import ExecutionResult, FailureRecord, HistoryStore, new_run_id
 from src.repository import Repository, TestCase
@@ -158,7 +157,8 @@ class DQEngine:
         built-ins. Every :placeholder the SQL uses must end up with a value,
         or the connector raises a clear error naming what's missing.
         """
-        merged: dict = {"batch_id": batch_id, "run_date": date.today(), "run_ts": datetime.now()}
+        now = now_ist()
+        merged: dict = {"batch_id": batch_id, "run_date": now.date(), "run_ts": now}
         merged.update(tc.param_defaults or {})
         merged.update({k: v for k, v in (overrides or {}).items() if v is not None})
         return merged

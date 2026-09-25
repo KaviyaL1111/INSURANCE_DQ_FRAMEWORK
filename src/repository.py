@@ -20,9 +20,9 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime, timezone
+from datetime import datetime
 
-from src.config import DEFAULT_USER, SQL_DIR
+from src.config import DEFAULT_USER, SQL_DIR, now_ist
 from src.connectors import get_connector
 
 TEST_TYPES = [
@@ -38,7 +38,7 @@ SEVERITIES = ["Critical", "High", "Medium", "Low"]
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_ist()
 
 
 def _uid() -> str:

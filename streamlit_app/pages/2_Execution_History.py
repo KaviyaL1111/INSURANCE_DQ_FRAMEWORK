@@ -6,28 +6,29 @@ matching executions, tick the ones you want, press Execute Selected Tests.
 Each selected test is reloaded from the repository at its latest saved
 configuration before it runs.
 """
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pandas as pd
 import streamlit as st
 
-from common import (batch_id, get_regression_engine, get_repository, page_setup,
-                    param_inputs, show_results, sidebar, STATUS_ICON)
+from common import (batch_id, fmt_ts, get_regression_engine, get_repository, page_header,
+                    page_setup, param_inputs, show_results, sidebar, status_label)
+from src.config import today_ist
 
 page_setup("Execution History", "🕘")
 project = sidebar()
 repo = get_repository()
 pid = project["PROJECT_ID"]
 
-st.title("Execution History")
-st.caption("Filter past executions by date, select the ones you need, and rerun them. "
-           "A rerun always uses each test case's latest saved configuration.")
+page_header("🕘 Execution History",
+            "Filter past executions by date, select the ones you need, and rerun them. "
+            "A rerun always uses each test case's latest saved configuration.")
 
 # ---------------------------------------------------------------- 2. filter
 with st.form("history_filter"):
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-    start = c1.date_input("Start date", value=date.today() - timedelta(days=7))
-    end = c2.date_input("End date", value=date.today())
+    start = c1.date_input("Start date", value=today_ist() - timedelta(days=7))
+    end = c2.date_input("End date", value=today_ist())
     status = c3.selectbox("Status", ["(any)", "FAIL", "ERROR", "PASS"])
     latest = c4.checkbox("Latest run per test only", value=False,
                          help="Collapse repeated runs of the same test case.")
@@ -54,16 +55,22 @@ if not rows:
 
 # ------------------------------------------------- 3./4. display with checkboxes
 window = st.session_state.get("history_window", ("", ""))
-st.success(f"{len(rows)} execution(s) between {window[0]} and {window[1]}")
+n_fail = sum(r["STATUS"] == "FAIL" for r in rows)
+n_err = sum(r["STATUS"] == "ERROR" for r in rows)
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Executions", len(rows))
+c2.metric("Test cases", len({r["TEST_CASE_ID"] for r in rows}))
+c3.metric("Failed", n_fail)
+c4.metric("Could not run", n_err)
+st.caption(f"Between {window[0]} and {window[1]} (IST)")
 
 frame = pd.DataFrame([{
     "Select": False,
-    "": STATUS_ICON.get(r["STATUS"], "⚪"),
+    "Status": status_label(r["STATUS"]),
     "Test case": r["TEST_CASE_ID"],
     "Name": r["TEST_NAME"] or "",
     "Folder": r["FOLDER_PATH"] or "",
-    "Run at": r["RUN_TS"],
-    "Status": r["STATUS"],
+    "Run at (IST)": fmt_ts(r["RUN_TS"]),
     "Failed records": r["FAILED_RECORD_COUNT"],
     "Mode": r["RUN_MODE"],
     "Ran version": r["TEST_VERSION_NO"],
@@ -90,7 +97,6 @@ edited = st.data_editor(
     disabled=[c for c in frame.columns if c not in ("Select", "_execution_id")],
     column_config={
         "Select": st.column_config.CheckboxColumn("Select", help="Tick to include in the rerun"),
-        "": st.column_config.TextColumn("", width="small"),
     },
     key="history_editor",
 )
@@ -113,7 +119,8 @@ else:
     overrides = param_inputs(needed, defaults, "history")
 
     versions = {tc.test_case_id: tc.version_no for tc in cases}
-    ran_versions = {r["TEST_CASE_ID"]: r["TEST_VERSION_NO"] for r in rows}
+    # rows are newest first; walk them oldest first so each test keeps its LATEST run
+    ran_versions = {r["TEST_CASE_ID"]: r["TEST_VERSION_NO"] for r in reversed(rows)}
     changed = [t for t in selected_ids
                if ran_versions.get(t) and versions[t] != ran_versions[t]]
     if changed:

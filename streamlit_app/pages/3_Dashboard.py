@@ -2,8 +2,8 @@
 import pandas as pd
 import streamlit as st
 
-from common import (batch_id, get_history, get_regression_engine, get_repository,
-                    page_setup, show_results, sidebar, STATUS_ICON)
+from common import (batch_id, fmt_ts, get_history, get_regression_engine, get_repository,
+                    page_header, page_setup, show_results, sidebar, status_label)
 
 page_setup("Dashboard", "📊")
 project = sidebar()
@@ -11,9 +11,9 @@ repo = get_repository()
 history = get_history()
 pid = project["PROJECT_ID"]
 
-st.title("Dashboard")
-st.caption("Every figure below reflects the **most recent run of each test case**, so a "
-           "corrected defect stops being counted the moment it is revalidated.")
+page_header("📊 Dashboard",
+            "Every figure below reflects the **most recent run of each test case**, so a "
+            "corrected defect stops being counted the moment it is revalidated.")
 
 summary = history.dashboard_summary(pid)
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -29,29 +29,40 @@ if summary["total"] == 0:
     st.info("Nothing has been executed yet. Run some test cases from the **Test Cases** page.")
     st.stop()
 
-if summary["errored"]:
-    st.warning(f"{summary['errored']} test case(s) could not run at all — check their SQL.")
-
-st.progress((summary["passed"] / summary["total"]) if summary["total"] else 0.0)
+st.progress((summary["passed"] / summary["total"]) if summary["total"] else 0.0,
+            text=f"{summary['passed']} passed · {summary['failed']} failed · "
+                 f"{summary['errored']} could not run")
 st.divider()
 
 # ------------------------------------------------------------ latest status
-st.subheader("Latest status by test case")
 latest = history.get_execution_history("1970-01-01", "2999-12-31",
                                        project_id=pid, latest_per_test=True)
+st.subheader("Latest status by test case")
 if latest:
-    st.dataframe(
-        pd.DataFrame([{
-            "": STATUS_ICON.get(r["STATUS"], "⚪"),
-            "Test case": r["TEST_CASE_ID"],
-            "Name": r["TEST_NAME"],
-            "Folder": r["FOLDER_PATH"],
-            "Status": r["STATUS"],
-            "Failed records": r["FAILED_RECORD_COUNT"],
-            "Last run": r["RUN_TS"],
-            "Version": r["TEST_VERSION_NO"],
-        } for r in latest]),
-        use_container_width=True, hide_index=True)
+    status_frame = pd.DataFrame([{
+        "Status": status_label(r["STATUS"]),
+        "Test case": r["TEST_CASE_ID"],
+        "Name": r["TEST_NAME"],
+        "Folder": r["FOLDER_PATH"],
+        "Failed records": r["FAILED_RECORD_COUNT"],
+        "Last run (IST)": fmt_ts(r["RUN_TS"]),
+        "Version": r["TEST_VERSION_NO"],
+        "Error": (r.get("ERROR_MESSAGE") or "")[:300],
+    } for r in latest])
+    show = st.segmented_control(
+        "Show", ["All", "Failing", "Could not run", "Passing"], default="All",
+        key="dash_status_filter", label_visibility="collapsed") or "All"
+    wanted = {"Failing": "FAIL", "Could not run": "ERROR", "Passing": "PASS"}.get(show)
+    view = status_frame if wanted is None else \
+        status_frame[[r["STATUS"] == wanted for r in latest]]
+    if not summary["errored"]:
+        view = view.drop(columns=["Error"])
+    st.dataframe(view, use_container_width=True, hide_index=True,
+                 column_config={"Error": st.column_config.TextColumn(
+                     "Why it could not run", width="large")})
+    if summary["errored"] and show == "All":
+        st.caption(f"🟠 {summary['errored']} test case(s) could not run — the reason is in the "
+                   "last column. Pick *Could not run* above to see only those.")
 
 # -------------------------------------------------------- failed record detail
 st.subheader("Failed records — expected vs actual")
@@ -67,7 +78,7 @@ else:
         "Actual": f["ACTUAL_VALUE"],
         "Type": f["FAILURE_TYPE"],
         "Reason": f["FAILURE_REASON"],
-        "When": f["FAILED_TS"],
+        "When (IST)": fmt_ts(f["FAILED_TS"]),
     } for f in failures])
 
     c1, c2 = st.columns([1, 1])

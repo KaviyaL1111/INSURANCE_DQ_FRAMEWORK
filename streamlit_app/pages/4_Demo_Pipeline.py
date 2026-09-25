@@ -8,7 +8,7 @@ validate, correct, rerun from the Regression folder.
 import pandas as pd
 import streamlit as st
 
-from common import (batch_id, get_regression_engine, get_repository, page_setup,
+from common import (batch_id, get_regression_engine, get_repository, page_header, page_setup,
                     show_results, sidebar)
 from src import etl_loader
 from src.seed import seed_catalog
@@ -16,10 +16,10 @@ from src.seed import seed_catalog
 page_setup("Demo Pipeline", "⚙️")
 project = sidebar(require_project=False)
 
-st.title("Demo Pipeline")
-st.caption("Everything here operates on the sample insurance dataset "
-           "(30 customers, 40 policies, 50 claims). Use it to walk through the "
-           "corrupt → detect → correct → rerun cycle.")
+page_header("⚙️ Demo Pipeline",
+            "Everything here operates on the sample insurance dataset "
+            "(30 customers, 40 policies, 50 claims). Use it to walk through the "
+            "corrupt → detect → correct → rerun cycle.")
 
 st.subheader("1 · Set up")
 c1, c2 = st.columns(2)
@@ -62,11 +62,19 @@ pid = project["PROJECT_ID"]
 
 st.divider()
 st.subheader("3 · Validate")
+repo = get_repository()
+all_cases = repo.list_test_cases(project_id=pid)
+regression_only = st.checkbox(
+    "Only test cases marked *Include in regression suite*", value=False,
+    help="Leave unticked to run every active test case in the project.")
+excluded = [r["TEST_NAME"] for r in all_cases if not r["IS_REGRESSION"]] if regression_only else []
+st.caption(f"Will run **{len(all_cases) - len(excluded)} of {len(all_cases)}** test cases"
+           + (f" — skipping: {', '.join(excluded)}" if excluded else "") + ".")
 if st.button("▶ Run the full validation suite", type="primary"):
     eng = get_regression_engine()
     progress = st.progress(0.0)
     outcome = eng.run_full_suite(
-        pid, batch_id=batch_id(),
+        pid, batch_id=batch_id(), regression_only=regression_only,
         on_progress=lambda d, t, r: progress.progress(d / t, text=f"{d}/{t} · {r.test_case_id}"))
     progress.empty()
     st.session_state["demo_first_run"] = outcome.summary()

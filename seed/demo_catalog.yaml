@@ -56,6 +56,29 @@ test_cases:
            + (SELECT COUNT(*) FROM STG_CLAIM    WHERE BATCH_ID = :batch_id) AS STAGED_ROWS
 
   - folder: /Staging
+    name: Claims landing file vs staging
+    description: >-
+      Reconciles the landed claims file (data/claims.csv, read through the
+      flat-file connection) row by row against what the loader put in
+      STG_CLAIM for the batch.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: SOURCE_TO_TARGET
+    entity: Claim
+    layer: Staging
+    severity: High
+    source_connection: flatfile
+    key_columns: CLAIM_ID
+    source_sql: |
+      SELECT CLAIM_ID, POLICY_ID, CUSTOMER_ID, CLAIM_DATE, CLAIM_AMOUNT,
+             APPROVED_AMOUNT, CLAIM_STATUS, INCIDENT_TYPE
+      FROM CLAIMS
+    target_sql: |
+      SELECT CLAIM_ID, POLICY_ID, CUSTOMER_ID, CLAIM_DATE, CLAIM_AMOUNT,
+             APPROVED_AMOUNT, CLAIM_STATUS, INCIDENT_TYPE
+      FROM STG_CLAIM
+      WHERE BATCH_ID = :batch_id
+
+  - folder: /Staging
     name: Policy ID is mandatory
     description: POLICY_ID is the business key and can never be null or blank.
     test_type: SQL_ROWCOUNT

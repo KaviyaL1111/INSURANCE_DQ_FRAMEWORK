@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from src.connectors.base import Connector, ConnectionProfile, QueryResult, extract_params, split_statements
+from src.connectors.flatfile_connector import FlatFileConnector
 from src.connectors.mssql_connector import MSSQLConnector
 from src.connectors.snowflake_connector import SnowflakeConnector
 
-_REGISTRY = {"snowflake": SnowflakeConnector, "mssql": MSSQLConnector}
+_REGISTRY = {"snowflake": SnowflakeConnector, "mssql": MSSQLConnector, "flatfile": FlatFileConnector}
 
 
 def get_connector(profile_name: str | None = None) -> Connector:
@@ -25,6 +26,6 @@ def get_connector(profile_name: str | None = None) -> Connector:
 
 __all__ = [
     "Connector", "ConnectionProfile", "QueryResult",
-    "SnowflakeConnector", "MSSQLConnector",
+    "SnowflakeConnector", "MSSQLConnector", "FlatFileConnector",
     "get_connector", "extract_params", "split_statements",
 ]

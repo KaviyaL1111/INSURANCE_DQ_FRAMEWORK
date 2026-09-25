@@ -2,8 +2,9 @@
 import pandas as pd
 import streamlit as st
 
-from common import (batch_id, folder_options, get_engine, get_repository, page_setup,
-                    param_inputs, show_results, sidebar)
+from common import (batch_id, flatfile_tables_hint, fmt_ts, folder_options, get_engine,
+                    get_history, get_repository, page_header, page_setup, param_inputs,
+                    show_results, sidebar, status_label)
 from src.config import available_connections
 from src.repository import (DuplicateNameError, SEVERITIES, TEST_TYPES,
                             VALIDATION_SCOPES, TestCase)
@@ -23,7 +24,8 @@ project = sidebar()
 repo = get_repository()
 pid = project["PROJECT_ID"]
 
-st.title("Test Cases")
+page_header("🧪 Test Cases", "Author, version and execute saved validations. Source and "
+            "target can each be Snowflake, MSSQL or a flat file.")
 
 folders = folder_options(repo, pid)
 if not folders:
@@ -43,18 +45,39 @@ with browse:
     if not rows:
         st.info("No test cases in this folder yet — add one on the **Create / Edit** tab.")
     else:
-        st.dataframe(
-            pd.DataFrame([{"ID": r["TEST_CASE_ID"], "Name": r["TEST_NAME"],
-                           "Type": r["TEST_TYPE"], "Scope": r["VALIDATION_SCOPE"],
-                           "Entity": r["ENTITY"], "Severity": r["SEVERITY"],
-                           "Regression": "✓" if r["IS_REGRESSION"] else "",
-                           "v": r["VERSION_NO"], "Updated": r["UPDATED_TS"]} for r in rows]),
-            use_container_width=True, hide_index=True)
+        last = {h["TEST_CASE_ID"]: h for h in get_history().get_execution_history(
+            "1970-01-01", "2999-12-31", project_id=pid, latest_per_test=True)}
 
-        picked = st.multiselect("Select test cases to execute",
-                                [f"{r['TEST_CASE_ID']} · {r['TEST_NAME']}" for r in rows],
-                                key="tc_pick")
-        ids = [p.split(" · ")[0] for p in picked]
+        def _connections(r) -> str:
+            src, tgt = r["SOURCE_CONNECTION"], r["TARGET_CONNECTION"]
+            return src if r["TEST_TYPE"] not in ("SOURCE_TARGET_COMPARE", "ROW_COUNT_MATCH") \
+                else f"{src} → {tgt}"
+
+        query = st.text_input("Search", placeholder="Filter by ID, name, type or entity",
+                              key="tc_search", label_visibility="collapsed")
+        q = query.strip().lower()
+        shown = [r for r in rows if not q or q in " ".join(
+            str(r[k] or "") for k in ("TEST_CASE_ID", "TEST_NAME", "TEST_TYPE", "ENTITY")).lower()]
+
+        table = pd.DataFrame([{
+            "Last result": status_label(last[r["TEST_CASE_ID"]]["STATUS"])
+            if r["TEST_CASE_ID"] in last else "⚪ not run",
+            "ID": r["TEST_CASE_ID"], "Name": r["TEST_NAME"], "Type": r["TEST_TYPE"],
+            "Connections": _connections(r), "Entity": r["ENTITY"],
+            "Severity": r["SEVERITY"], "Regression": bool(r["IS_REGRESSION"]),
+            "v": r["VERSION_NO"],
+            "Last run (IST)": fmt_ts(last[r["TEST_CASE_ID"]]["RUN_TS"])
+            if r["TEST_CASE_ID"] in last else "",
+        } for r in shown])
+        event = st.dataframe(
+            table, use_container_width=True, hide_index=True, on_select="rerun",
+            selection_mode="multi-row", key=f"tc_table_{folder_id}",
+            column_config={"Regression": st.column_config.CheckboxColumn("Regression")})
+        ids = [shown[i]["TEST_CASE_ID"] for i in event.selection.rows]
+        if q and not shown:
+            st.caption(f"No test case in this folder matches “{query.strip()}”.")
+        st.caption(f"{len(ids)} selected — tick rows in the table to choose what to execute."
+                   if ids else "Tick rows in the table to choose what to execute.")
 
         overrides = {}
         if ids:
@@ -67,7 +90,8 @@ with browse:
             overrides = param_inputs(needed, defaults, "browse")
 
         c1, c2 = st.columns([1, 3])
-        run_selected = c1.button("▶ Execute selected", type="primary",
+        run_selected = c1.button(f"▶ Execute {len(ids) or ''} selected".replace("  ", " "),
+                                 type="primary",
                                  disabled=not ids, use_container_width=True)
         run_folder = c2.button(f"▶ Execute the whole {folder['FOLDER_NAME']} folder",
                                use_container_width=True)
@@ -94,7 +118,9 @@ with editor:
     if not is_new:
         versions = repo.test_case_versions(tc.test_case_id)
         st.caption(f"`{tc.test_case_id}` · version {tc.version_no} · "
-                   f"last edited {tc.updated_ts} by {tc.updated_by}")
+                   f"last edited {fmt_ts(tc.updated_ts)} IST by {tc.updated_by}")
+
+    flatfile_tables_hint()
 
     with st.form("test_case_form"):
         c1, c2 = st.columns([3, 2])
@@ -127,8 +153,9 @@ with editor:
             tgt_conn = c2.selectbox("Target connection", profiles,
                                     index=profiles.index(tc.target_connection)
                                     if tc.target_connection in profiles else 0,
-                                    help="Pick a different database here to compare "
-                                         "Snowflake against MSSQL.")
+                                    help="Pick a different connection here to compare "
+                                         "Snowflake against MSSQL, or a flat file against "
+                                         "the table it was loaded into.")
             source_sql = st.text_area("Source SQL *", value=tc.source_sql, height=170,
                                       help="Use :batch_id and any other :parameters you need.")
             target_sql = st.text_area("Target SQL *", value=tc.target_sql, height=170)

@@ -42,7 +42,7 @@ class QueryResult:
 class ConnectionProfile:
     """One named database this app can talk to (from .env)."""
     name: str
-    kind: str                       # 'snowflake' | 'mssql'
+    kind: str                       # 'snowflake' | 'mssql' | 'flatfile'
     options: dict = field(default_factory=dict)
 
 

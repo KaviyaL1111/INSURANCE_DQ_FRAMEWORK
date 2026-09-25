@@ -24,12 +24,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, timedelta
+from datetime import timedelta
 
 from tabulate import tabulate
 
 from src import etl_loader
-from src.config import DEFAULT_BATCH_ID, DEFAULT_CONNECTION, DEMO_PROJECT, available_connections
+from src.config import (DEFAULT_BATCH_ID, DEFAULT_CONNECTION, DEMO_PROJECT, TIMEZONE_LABEL,
+                        available_connections, today_ist)
 from src.connectors import get_connector
 from src.dq_engine import DQEngine
 from src.history import HistoryStore
@@ -98,6 +99,14 @@ def cmd_doctor(args):
     except Exception as exc:
         raise SystemExit(f"{BAD} Could not build the connection profile:\n   {exc}")
     try:
+        if conn.kind == "flatfile":
+            tables = conn.describe()
+            print(f"\n{OK} Read {len(tables)} table(s) from {conn.profile.options['path']}")
+            print(_table([[t["table"], t["file"], t["rows"], len(t["columns"])] for t in tables],
+                         headers=["Table", "File", "Rows", "Columns"]))
+            for err in conn.load_errors:
+                print(f"  {WARN} {err['file']}: {err['error']}")
+            return
         if conn.kind == "snowflake":
             res = conn.query("""SELECT CURRENT_ACCOUNT(), CURRENT_USER(), CURRENT_ROLE(),
                                        CURRENT_WAREHOUSE(), CURRENT_DATABASE(), CURRENT_SCHEMA(),
@@ -226,7 +235,7 @@ def cmd_history(args):
             status=args.status or "", latest_per_test=args.latest,
         )
         print(_table([{"Test": r["TEST_CASE_ID"], "Name": (r["TEST_NAME"] or "")[:36],
-                       "Run": r["RUN_TS"], "Status": r["STATUS"],
+                       f"Run ({TIMEZONE_LABEL})": r["RUN_TS"], "Status": r["STATUS"],
                        "Failures": r["FAILED_RECORD_COUNT"], "Mode": r["RUN_MODE"],
                        "v": r["TEST_VERSION_NO"], "By": r["EXECUTED_BY"]} for r in rows]))
         print(f"\n  {len(rows)} execution(s) between {args.start} and {args.end}")
@@ -237,7 +246,7 @@ def cmd_rerun(args):
     with RegressionEngine() as eng:
         project = _resolve_project(eng.repo, args.project)
         if args.failed_since:
-            end = args.failed_until or date.today().isoformat()
+            end = args.failed_until or today_ist().isoformat()
             ids = eng.failed_test_case_ids(args.failed_since, end,
                                            project_id=project["PROJECT_ID"])
             if not ids:
@@ -337,7 +346,7 @@ def cmd_demo(args):
         steps.append(("regression rerun", regression))
 
         step(7, "Rerun everything that failed, selected from execution history")
-        today = date.today()
+        today = today_ist()
         outcome = eng.rerun_failed_in_window(today - timedelta(days=1), today,
                                              project_id=pid, batch_id=args.batch_id)
         _print_results(outcome.results)

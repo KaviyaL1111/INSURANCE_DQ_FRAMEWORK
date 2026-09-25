@@ -22,17 +22,17 @@ import uuid
 
 from dataclasses import dataclass, field
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time
 
  
 
-from src.config import DEFAULT_USER
+from src.config import DEFAULT_USER, now_ist
 
  
 
 def _now() -> datetime:
 
-    return datetime.now()
+    return now_ist()
 
  
 
@@ -44,7 +44,7 @@ def _uid() -> str:
 
 def new_run_id() -> str:
 
-    return f"RUN_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    return f"RUN_{now_ist().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
  
 

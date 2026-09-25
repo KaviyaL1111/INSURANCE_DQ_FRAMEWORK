@@ -194,3 +194,19 @@ class TestTheBriefsWalkthrough:
     def test_regression_folder_missing_gives_a_helpful_error(self, reg, suite):
         with pytest.raises(LookupError, match="no folder"):
             reg.run_regression_folder(suite["project"]["PROJECT_ID"], "/Nope")
+
+
+class TestFullSuiteScope:
+    def test_full_suite_runs_every_active_test_case(self, reg, repo, project):
+        """The suite count must match the project's test-case count (was 20 of 21)."""
+        folder = repo.create_folder(project["PROJECT_ID"], "Mixed")
+        for name, is_regression in (("rule", True), ("report", False)):
+            repo.create_test_case(TestCase(
+                project_id=project["PROJECT_ID"], folder_id=folder["FOLDER_ID"],
+                test_name=name, test_type="INFORMATIONAL", source_connection="sqlite",
+                validation_sql="SELECT 1 AS X", is_regression=is_regression))
+        total = len(repo.list_test_cases(project_id=project["PROJECT_ID"]))
+
+        assert reg.run_full_suite(project["PROJECT_ID"]).total == total == 2
+        only = reg.run_full_suite(project["PROJECT_ID"], regression_only=True)
+        assert [r.test_name for r in only.results] == ["rule"]

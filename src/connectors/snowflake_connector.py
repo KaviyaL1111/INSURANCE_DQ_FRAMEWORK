@@ -20,6 +20,9 @@ class SnowflakeConnector(Connector):
             role=o.get("role"),
             client_session_keep_alive=True,
             application="InsuranceDQFramework",
+            # CURRENT_TIMESTAMP() — and every DEFAULT CURRENT_TIMESTAMP() column —
+            # follows the session TIMEZONE, which Snowflake defaults to Los Angeles.
+            session_parameters={"TIMEZONE": o.get("timezone", "Asia/Kolkata")},
         )
         # Password OR key-pair OR external browser (Snowflake trials with MFA).
         if o.get("authenticator"):
