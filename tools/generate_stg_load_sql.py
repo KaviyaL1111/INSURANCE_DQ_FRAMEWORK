@@ -8,23 +8,17 @@ SQL in step with them. Run after editing any CSV:
 """
 import csv
 import os
+import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from src.staging import NUMERIC, STAGING_TABLES  # noqa: E402  (one column list for both)
+
 DATA = os.path.join(ROOT, "data")
 OUT = os.path.join(ROOT, "sql", "02_stg_load_sample_data.sql")
 
-TABLES = [
-    ("STG_CUSTOMER", "customers.csv",
-     ["CUSTOMER_ID", "CUSTOMER_NAME", "EMAIL", "PHONE_NUMBER", "CITY", "LAST_UPDATED_TS"]),
-    ("STG_POLICY", "policies.csv",
-     ["POLICY_ID", "CUSTOMER_ID", "POLICY_NUMBER", "POLICY_TYPE", "POLICY_STATUS",
-      "PREMIUM_AMOUNT", "SUM_INSURED", "ISSUE_DATE", "EXPIRY_DATE", "LAST_UPDATED_TS"]),
-    ("STG_CLAIM", "claims.csv",
-     ["CLAIM_ID", "POLICY_ID", "CUSTOMER_ID", "CLAIM_DATE", "CLAIM_AMOUNT",
-      "APPROVED_AMOUNT", "CLAIM_STATUS", "INCIDENT_TYPE", "LAST_UPDATED_TS"]),
-]
-
-NUMERIC = {"PREMIUM_AMOUNT", "SUM_INSURED", "CLAIM_AMOUNT", "APPROVED_AMOUNT"}
+TABLES = [(table, csv_name, columns) for table, (csv_name, columns) in STAGING_TABLES.items()]
 
 
 def lit(column: str, value: str) -> str:

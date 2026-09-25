@@ -158,7 +158,7 @@ The left sidebar has five pages:
 pytest -q
 ```
 
-144 should pass, 5 skip.
+173 should pass, 5 skip.
 
 ---
 

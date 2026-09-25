@@ -11,12 +11,15 @@ import pandas as pd
 import streamlit as st
 
 from common import (batch_id, flatfile_available, flatfile_dir, flatfile_signature,
+                    get_engine, show_results,
                     folder_options, get_flatfile, get_repository, page_header, page_setup,
                     param_inputs, sidebar)
 from src.config import available_connections
 from src.connectors.base import extract_params
 from src.connectors.flatfile_connector import SUPPORTED_EXTENSIONS, safe_filename, table_name_for
 from src.repository import DuplicateNameError, SEVERITIES, TestCase
+from src.staging import (STAGING_TABLES, check_for_staging, guess_staging_table,
+                         load_to_staging, read_file_as_text)
 
 PREVIEW_ROWS = 200
 _ISO_DATE = r"^\d{4}-\d{2}-\d{2}$"
@@ -142,8 +145,9 @@ if not tables:
     st.info(f"No supported files yet ({', '.join(SUPPORTED_EXTENSIONS)}). Upload one above.")
     st.stop()
 
-browse_tab, sql_tab, build_tab = st.tabs(["🔎 Browse & profile", "🧮 SQL query",
-                                          "🧪 Create a reconciliation test"])
+browse_tab, sql_tab, load_tab, build_tab = st.tabs(
+    ["🔎 Browse & profile", "🧮 SQL query", "⬆ Load into staging",
+     "🧪 Create a reconciliation test"])
 
 by_name = {t["table"]: t for t in tables}
 
@@ -216,6 +220,109 @@ with sql_tab:
             st.dataframe(out, use_container_width=True, hide_index=True)
             st.download_button("⬇ Download (CSV)", out.to_csv(index=False).encode(),
                                file_name="flatfile_query.csv", mime="text/csv")
+
+# ------------------------------------------------------- load into staging
+@st.cache_data(show_spinner="Checking the file…", max_entries=16)
+def _read_for_staging(signature: tuple, path: str):
+    return read_file_as_text(path)
+
+
+with load_tab:
+    repo_db = get_repository().db
+    st.caption(f"Writes the file's rows into a staging table in the **{repo_db.profile.name}** "
+               "database, under a batch ID. Everything downstream — transformation, curated, "
+               "and the saved test cases — then runs on this data. Nothing is written until "
+               "you press **Load**.")
+
+    loadable = [t for t in by_name if not by_name[t]["sheet"]]
+    guessed = [t for t in loadable if guess_staging_table(t)]
+    c1, c2 = st.columns(2)
+    src_name = c1.selectbox("File", loadable, format_func=_table_label, key="stg_file",
+                            index=loadable.index(guessed[0]) if guessed else 0)
+    targets = list(STAGING_TABLES)
+    default_target = guess_staging_table(src_name)
+    target = c2.selectbox("Staging table", targets, key=f"stg_target_{src_name}",
+                          index=targets.index(default_target) if default_target else 0,
+                          help="Guessed from the file name — change it if the guess is wrong.")
+
+    c1, c2 = st.columns(2)
+    load_batch = c1.text_input("Batch ID", value=batch_id(), key="stg_batch",
+                               help="Defaults to the batch in the sidebar, which is the batch "
+                                    "every test case runs against.")
+    mode = c2.radio("Rows already staged for this batch", ["Replace them", "Keep them (append)"],
+                    horizontal=True, key="stg_mode")
+
+    path = os.path.join(folder, by_name[src_name]["file"])
+    try:
+        cols, rows = _read_for_staging(flatfile_signature(), path)
+    except Exception as exc:
+        st.error(f"Could not read {by_name[src_name]['file']}: {exc}")
+        cols, rows = [], []
+    check = check_for_staging(target, cols, rows)
+
+    found = {c.strip().upper() for c in cols}
+    mapping = pd.DataFrame([{"Column": c, "In the file": c in found}
+                            for c in STAGING_TABLES[target][1]])
+    left, right = st.columns([2, 3], gap="large")
+    with left:
+        st.markdown(f"**Columns {target} needs**")
+        st.dataframe(mapping, use_container_width=True, hide_index=True,
+                     column_config={"In the file": st.column_config.CheckboxColumn()})
+    with right:
+        st.markdown("**Checks**")
+        if check.missing_columns:
+            st.error(f"The file is missing {len(check.missing_columns)} column(s) {target} "
+                     f"needs: {', '.join(check.missing_columns)}. Rename the file's headers "
+                     "to match, or pick a different staging table.")
+        for e in check.errors:
+            st.error(e)
+        for w in check.warnings:
+            st.warning(w)
+        if check.ok:
+            st.success(f"{check.row_count:,} row(s) ready to load into {target}.")
+
+    if check.ok:
+        replace = mode == "Replace them"
+        # A fresh key after each load un-ticks the box; Streamlit won't let us
+        # reset a widget's own key once it has been drawn.
+        confirm = st.checkbox(
+            f"Write {check.row_count:,} row(s) to **{target}** in **{repo_db.profile.name}** for "
+            f"batch **{load_batch}**" + (" — replacing that batch's current rows" if replace
+                                        else " — keeping that batch's current rows"),
+            key=f"stg_confirm_{st.session_state.get('stg_loads', 0)}")
+        if st.button("⬆ Load into staging", type="primary", disabled=not confirm):
+            try:
+                with st.spinner(f"Loading {target}…"):
+                    out = load_to_staging(repo_db, target, cols, rows, load_batch.strip(),
+                                          source_file=by_name[src_name]["file"], replace=replace)
+            except Exception as exc:
+                msg = str(exc)
+                if "does not exist" in msg.lower() or "no such table" in msg.lower():
+                    msg += ("\n\nThe staging tables haven't been created yet: use **Create "
+                            "tables** on the Demo Pipeline page, or run `python -m src.cli init`.")
+                st.error(f"Nothing was loaded — the change was rolled back.\n\n{msg}")
+            else:
+                st.session_state["stg_last_load"] = out
+                st.session_state["stg_loads"] = st.session_state.get("stg_loads", 0) + 1
+                st.rerun()
+
+    last = st.session_state.get("stg_last_load")
+    if last:
+        st.success(f"Loaded {last['inserted']:,} row(s) into {last['table']} for batch "
+                   f"{last['batch_id']}"
+                   + (f", replacing {last['deleted']:,} earlier row(s)" if last["deleted"] else "")
+                   + f". {last['table']} now holds {last['staged_now']:,} row(s) for that batch.")
+        staging_folder = None
+        if project is not None:
+            staging_folder = get_repository().find_folder_by_path(project["PROJECT_ID"],
+                                                                  "/Staging")
+        if staging_folder and st.button("▶ Run the /Staging test cases on this batch"):
+            with st.spinner("Running…"):
+                results = get_engine().run_folder(staging_folder["FOLDER_ID"],
+                                                  batch_id=last["batch_id"])
+            show_results(results)
+        elif not staging_folder:
+            st.caption("Next: run your staging test cases from the **Test Cases** page.")
 
 # ------------------------------------------------------ test-case builder
 with build_tab:

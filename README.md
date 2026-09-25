@@ -156,6 +156,26 @@ Files are re-read automatically when they change. `python -m src.cli
 Queries against files run in SQLite, so use SQLite syntax in the flat-file
 side of a test case. The flat-file connection can't hold the repository.
 
+### Load into staging
+
+Browsing a file never writes to the database. To get a file's rows **into**
+Snowflake, use **Flat Files → Load into staging** (or
+`python -m src.cli load-file my_claims.csv`). It inserts the rows into
+`STG_CUSTOMER`, `STG_POLICY` or `STG_CLAIM` under a batch ID. By default it
+replaces that batch's rows in that table; you can choose to append instead.
+
+Before anything is written, the file is checked:
+
+* **blocking**: a required column is missing, a business key is empty,
+  an amount isn't a number, or a date isn't `YYYY-MM-DD`. Nothing loads.
+* **warning**: duplicate keys and extra columns. The rows still load, and
+  catching them is the job of the saved test cases.
+
+A load writes every row or none: it runs in a single transaction.
+`DQ_BATCH_METADATA` is updated so the row-count reconciliation test stays
+accurate. [docs/FLAT_FILE_TESTING.md](docs/FLAT_FILE_TESTING.md) is a
+step-by-step guide for testers.
+
 ---
 
 ## Time zone
@@ -182,6 +202,7 @@ src/
   dq_engine.py         executes a saved test case
   regression_engine.py history filtering and selective rerun
   seed.py              loads seed/demo_catalog.yaml into the repository
+  staging.py           checks a flat file and loads it into an STG_* table
   cli.py               command line
 streamlit_app/
   DQ_Workspace.py      Projects & Folders (home)
@@ -198,8 +219,8 @@ sql/
   mssql/                         T-SQL mirror + how to enable MSSQL
 seed/demo_catalog.yaml   18 starter test cases across 7 folders
 data/*.csv               the demo dataset (source of truth for 02_*.sql)
-tools/                   regenerate the load SQL from the CSVs
-tests/                   144 tests, no database required
+tools/                   regenerate the load SQL; make awkward flat-file test samples
+tests/                   173 tests, no database required
 docs/SNOWFLAKE_SETUP.md  setup for a new trial account
 ```
 
@@ -252,6 +273,7 @@ python -m src.cli dashboard
 | `init` | create repository control tables and demo tables |
 | `seed-catalog` | load the demo project, folders and test cases |
 | `load-data [--clean]` | run the ETL pipeline, with or without defects |
+| `load-file FILE [--table T] [--append] [--dry-run]` | check a CSV / Excel file and load it into a staging table |
 | `projects` / `folders` / `tests` | browse the repository |
 | `run [--all\|--folder\|--tests]` | execute saved test cases |
 | `history --start --end` | execution history for a date range |
@@ -271,7 +293,7 @@ detail in the terminal.
 pytest -q
 ```
 
-144 tests run against an in-memory SQLite database through the same
+173 tests run against an in-memory SQLite database through the same
 `Connector` interface, so the repository, engine and full
 corrupt → detect → correct → rerun cycle are all verified without needing
 credentials. `tests/test_integration_snowflake.py` exercises the real

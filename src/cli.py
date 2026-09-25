@@ -6,6 +6,7 @@ Command-line interface.
     python -m src.cli seed-catalog           load the demo project, folders and test cases
     python -m src.cli load-data              run the ETL pipeline (injects 3 demo defects)
     python -m src.cli load-data --clean      run it with no defects
+    python -m src.cli load-file claims.csv   load one CSV / Excel file into its STG_* table
     python -m src.cli projects               list projects
     python -m src.cli folders                show the folder tree with test counts
     python -m src.cli tests                  list saved test cases
@@ -152,6 +153,49 @@ def cmd_load_data(args):
     print(f"{OK} Pipeline loaded for batch {result['batch_id']}"
           + (" (clean)" if args.clean else " — 3 demo defects injected"))
     print(_table([result["row_counts"]]))
+
+
+def cmd_load_file(args):
+    import os
+
+    from src.staging import (STAGING_TABLES, check_for_staging, guess_staging_table,
+                             load_to_staging, read_file_as_text)
+
+    stem = os.path.splitext(os.path.basename(args.file))[0]
+    table = (args.table or guess_staging_table(stem) or "").upper()
+    if table not in STAGING_TABLES:
+        raise SystemExit(f"{BAD} Can't tell which staging table '{args.file}' is for. "
+                         f"Pass --table {' | '.join(STAGING_TABLES)}")
+    try:
+        columns, rows = read_file_as_text(args.file)
+    except Exception as exc:
+        raise SystemExit(f"{BAD} Could not read {args.file}: {exc}")
+
+    check = check_for_staging(table, columns, rows)
+    print(f"{args.file} -> {table}  ({check.row_count} row(s), batch {args.batch_id})")
+    if check.missing_columns:
+        print(f"  {BAD} missing column(s): {', '.join(check.missing_columns)}")
+    for e in check.errors:
+        print(f"  {BAD} {e}")
+    for w in check.warnings:
+        print(f"  {WARN} {w}")
+    if not check.ok:
+        raise SystemExit(f"{BAD} Nothing was loaded. Fix the file and try again.")
+    if args.dry_run:
+        print(f"{OK} The file is ready to load (dry run — nothing written).")
+        return
+
+    conn = get_connector(args.connection)
+    try:
+        out = load_to_staging(conn, table, columns, rows, args.batch_id,
+                              source_file=os.path.basename(args.file),
+                              replace=not args.append)
+    finally:
+        conn.close()
+    print(f"{OK} Loaded {out['inserted']} row(s) into {table}"
+          + (f", replacing {out['deleted']} earlier row(s)" if out["deleted"] else "")
+          + f". {table} now holds {out['staged_now']} row(s) for batch {args.batch_id}.")
+    print("  Next: python -m src.cli run --folder /Staging")
 
 
 def cmd_corrupt(args):
@@ -400,6 +444,13 @@ def main():
 
     s = add("load-data", cmd_load_data, help="Run the ETL pipeline")
     s.add_argument("--clean", action="store_true", help="Do not inject the demo defects")
+
+    s = add("load-file", cmd_load_file, help="Load a CSV / Excel file into a staging table")
+    s.add_argument("file", help="Path to the file, e.g. my_claims.csv")
+    s.add_argument("--table", help="STG_CUSTOMER, STG_POLICY or STG_CLAIM (guessed from the name)")
+    s.add_argument("--append", action="store_true",
+                   help="Keep rows already staged for this batch (default: replace them)")
+    s.add_argument("--dry-run", action="store_true", help="Check the file without loading it")
 
     add("corrupt", cmd_corrupt, help="Inject the 3 demo defects")
     add("fix", cmd_fix, help="Correct the 3 demo defects")
