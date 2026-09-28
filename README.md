@@ -50,10 +50,11 @@ streamlit run streamlit_app/DQ_Workspace.py
 | Prevent duplicate test-case names in a folder | enforced in `Repository.create_test_case` |
 | Unique test-case ID | `TC-00001`, generated per save |
 | Source-to-target validation | `SOURCE_TARGET_COMPARE` test type |
-| Historical validation | `/Historical` folder — date-range parameters |
-| Incremental load validation | `/Incremental` folder — `DQ_WATERMARK` bounds |
+| Historical validation | `/Historical` folder — date-range parameters, latest version per record |
+| Incremental load validation | `/Incremental` folder — per-entity `DQ_WATERMARK` windows |
 | Snowflake + MSSQL | `src/connectors/` — see [sql/mssql/README.md](sql/mssql/README.md) |
 | Flat files (CSV, TSV, Excel, JSON, Parquet) | `flatfile` connection · `Flat Files` page — see [below](#flat-file-connectivity) |
+| Load a flat file through to curated, then validate it | `Flat Files → Load into staging & curated` · `src/staging.py`, `src/curated.py` — see [below](#promote-to-curated) |
 
 ---
 
@@ -176,6 +177,40 @@ A load writes every row or none: it runs in a single transaction.
 accurate. [docs/FLAT_FILE_TESTING.md](docs/FLAT_FILE_TESTING.md) is a
 step-by-step guide for testers.
 
+### Promote to curated
+
+Once a batch is staged, the same tab (or `python -m src.cli promote`, or
+`load-file FILE --promote`) takes it the rest of the way:
+
+1. **Transformation**: `03_transform_load.sql` applies the mapping rules
+   (CUS-001..004, POL-001..006, CLM-001..006) to that batch.
+2. **Curated**: `04_curated_merge_load.sql` merges it into `POLICY_MASTER`,
+   `CLAIM_MASTER` and `CUSTOMER_360` on the business key, recomputes the
+   customer totals, and moves the watermark for each entity the batch
+   carried.
+3. **Validation**: the `/Source-to-Target`, `/Historical` and `/Incremental`
+   test cases run on the batch. The historical window defaults to the dates
+   the batch covers.
+
+Steps 1 and 2 run in a single transaction. Before anything runs:
+
+* **blocking**: nothing is staged for the batch, or a business key appears
+  twice in it. Curated keeps one row per key.
+* **warning**: a claim whose policy is neither in the batch nor in
+  `POLICY_MASTER`. Rule CLM-006 drops it, and the rest of the batch still
+  goes through.
+
+A batch can carry any subset of the three files. For example, a claims-only
+delta file links to policies loaded earlier.
+
+What each folder checks after a promotion:
+
+| Folder | Checks |
+|---|---|
+| `/Source-to-Target` | transformation vs curated, plus **staging vs curated**: the mapping rules are re-applied to the raw staged rows, so a wrong rule is caught even when transformation and curated agree. Customer totals are checked for every customer the batch touched. |
+| `/Historical` | for records effective in the window, curated holds the **latest** version any batch delivered. An older file loaded after a newer one shows up here. |
+| `/Incremental` | every record in the batch is newer than the previous batch's high watermark, so already-processed data sent again fails. It is also no later than this batch's own high watermark. Policy, claim and customer each have their own watermark. |
+
 ---
 
 ## Time zone
@@ -203,12 +238,14 @@ src/
   regression_engine.py history filtering and selective rerun
   seed.py              loads seed/demo_catalog.yaml into the repository
   staging.py           checks a flat file and loads it into an STG_* table
+  curated.py           promotes a staged batch to curated and validates it
   cli.py               command line
 streamlit_app/
   DQ_Workspace.py      Projects & Folders (home)
   pages/1_Test_Cases.py        browse, author, edit, run
   pages/2_Execution_History.py date filter, checkboxes, rerun
-  pages/3_Dashboard.py         current state, mismatch detail, CSV export
+  pages/3_Dashboard.py         KPI tiles, charts (status by folder, failures, trend, records per layer), mismatch detail
+  charts.py            the Dashboard's Altair charts and KPI tiles
   pages/4_Demo_Pipeline.py     drive the sample pipeline from the browser
   pages/5_Flat_Files.py        upload, browse, profile and query files; build file tests
 sql/
@@ -217,10 +254,10 @@ sql/
   01_ddl_create_all_tables.sql   the insurance demo tables
   02..06_*.sql                   load, transform, merge, corrupt, correct
   mssql/                         T-SQL mirror + how to enable MSSQL
-seed/demo_catalog.yaml   18 starter test cases across 7 folders
+seed/demo_catalog.yaml   25 starter test cases across 7 folders
 data/*.csv               the demo dataset (source of truth for 02_*.sql)
 tools/                   regenerate the load SQL; make awkward flat-file test samples
-tests/                   173 tests, no database required
+tests/                   200 tests, no database required
 docs/SNOWFLAKE_SETUP.md  setup for a new trial account
 ```
 
@@ -234,7 +271,7 @@ The brief's Notes section, automated:
 python -m src.cli demo
 ```
 
-It creates the schema, seeds 18 test cases across 7 folders, loads
+It creates the schema, seeds 25 test cases across 7 folders, loads
 30 customers / 40 policies / 50 claims through
 `Staging → Transformation → Curated`, injects three defects, validates,
 shows the failed records with mismatch detail, corrects them, reruns the
@@ -273,7 +310,8 @@ python -m src.cli dashboard
 | `init` | create repository control tables and demo tables |
 | `seed-catalog` | load the demo project, folders and test cases |
 | `load-data [--clean]` | run the ETL pipeline, with or without defects |
-| `load-file FILE [--table T] [--append] [--dry-run]` | check a CSV / Excel file and load it into a staging table |
+| `load-file FILE [--table T] [--append] [--dry-run] [--promote]` | check a CSV / Excel file and load it into a staging table; `--promote` continues to curated |
+| `promote [--no-validate]` | transform the staged batch into curated, then run `/Source-to-Target`, `/Historical`, `/Incremental` |
 | `projects` / `folders` / `tests` | browse the repository |
 | `run [--all\|--folder\|--tests]` | execute saved test cases |
 | `history --start --end` | execution history for a date range |
@@ -293,11 +331,18 @@ detail in the terminal.
 pytest -q
 ```
 
-173 tests run against an in-memory SQLite database through the same
+179 tests run against an in-memory SQLite database through the same
 `Connector` interface, so the repository, engine and full
 corrupt → detect → correct → rerun cycle are all verified without needing
-credentials. `tests/test_integration_snowflake.py` exercises the real
-pipeline and skips automatically when Snowflake is not configured.
+credentials.
+
+`tests/test_curated.py` (21 more) runs the real Snowflake pipeline scripts
+and the seeded curated validations on DuckDB. It uses a small dialect shim,
+`tests/duckdb_support.py`, and skips unless DuckDB is installed:
+`pip install duckdb`.
+
+`tests/test_integration_snowflake.py` exercises the real pipeline and skips
+automatically when Snowflake is not configured.
 
 ---
 

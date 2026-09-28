@@ -7,6 +7,7 @@ Command-line interface.
     python -m src.cli load-data              run the ETL pipeline (injects 3 demo defects)
     python -m src.cli load-data --clean      run it with no defects
     python -m src.cli load-file claims.csv   load one CSV / Excel file into its STG_* table
+    python -m src.cli promote                transform a staged batch into curated, then validate
     python -m src.cli projects               list projects
     python -m src.cli folders                show the folder tree with test counts
     python -m src.cli tests                  list saved test cases
@@ -190,12 +191,74 @@ def cmd_load_file(args):
         out = load_to_staging(conn, table, columns, rows, args.batch_id,
                               source_file=os.path.basename(args.file),
                               replace=not args.append)
+        print(f"{OK} Loaded {out['inserted']} row(s) into {table}"
+              + (f", replacing {out['deleted']} earlier row(s)" if out["deleted"] else "")
+              + f". {table} now holds {out['staged_now']} row(s) for batch {args.batch_id}.")
+        if args.promote:
+            print()
+            _promote(conn, args)
+        else:
+            print("  Next: python -m src.cli run --folder /Staging, then "
+                  "python -m src.cli promote")
     finally:
         conn.close()
-    print(f"{OK} Loaded {out['inserted']} row(s) into {table}"
-          + (f", replacing {out['deleted']} earlier row(s)" if out["deleted"] else "")
-          + f". {table} now holds {out['staged_now']} row(s) for batch {args.batch_id}.")
-    print("  Next: python -m src.cli run --folder /Staging")
+
+
+def cmd_promote(args):
+    conn = get_connector(args.connection)
+    try:
+        _promote(conn, args)
+    finally:
+        conn.close()
+
+
+def _promote(conn, args):
+    """Staging -> transformation -> curated for args.batch_id, then the curated checks."""
+    from src.curated import (VALIDATION_FOLDERS, check_for_promotion, promote_to_curated,
+                             validate_curated)
+
+    check = check_for_promotion(conn, args.batch_id)
+    print(f"Promote batch {args.batch_id} to curated")
+    print(_table([check.staged]))
+    for e in check.errors:
+        print(f"  {BAD} {e}")
+    for w in check.warnings:
+        print(f"  {WARN} {w}")
+    if not check.ok:
+        raise SystemExit(f"{BAD} Nothing was promoted.")
+
+    out = promote_to_curated(conn, args.batch_id)
+    print(f"{OK} Transformation rules applied and merged into curated:")
+    print(_table([{**out["transformed"], **out["curated"]}]))
+    if args.no_validate:
+        print("  Next: python -m src.cli run --folder /Source-to-Target (and /Historical, "
+              "/Incremental)")
+        return
+
+    window = out["window"]
+    print(f"\nValidating {', '.join(VALIDATION_FOLDERS)}"
+          + (f" — historical window {window[0]} .. {window[1]}" if window else ""))
+    repo = Repository(connector=conn)
+    project = _resolve_project(repo, args.project)
+    engine = DQEngine(repository=repo)
+    try:
+        by_folder = validate_curated(engine, project["PROJECT_ID"], args.batch_id, window=window)
+        results = []
+        for path, folder_results in by_folder.items():
+            print(f"\n  {path}")
+            if folder_results is None:
+                print(f"  {WARN} the project has no {path} folder")
+                continue
+            _print_results(folder_results)
+            results += folder_results
+        if args.show_failures:
+            _print_failures(engine.history, results)
+        failed = [r for r in results if r.status != "PASS"]
+        if failed:
+            raise SystemExit(f"\n{BAD} {len(failed)} curated validation(s) did not pass.")
+        print(f"\n{OK} Every curated validation passed for batch {args.batch_id}.")
+    finally:
+        engine.close()
 
 
 def cmd_corrupt(args):
@@ -451,6 +514,16 @@ def main():
     s.add_argument("--append", action="store_true",
                    help="Keep rows already staged for this batch (default: replace them)")
     s.add_argument("--dry-run", action="store_true", help="Check the file without loading it")
+    s.add_argument("--promote", action="store_true",
+                   help="Then transform the batch into curated and validate it (see promote)")
+    s.add_argument("--no-validate", action="store_true", help="With --promote: skip the checks")
+    s.add_argument("--show-failures", action="store_true", help="Print mismatch detail")
+
+    s = add("promote", cmd_promote,
+            help="Transform a staged batch into curated, then run the "
+                 "source-to-target, historical and incremental checks")
+    s.add_argument("--no-validate", action="store_true", help="Promote only; skip the checks")
+    s.add_argument("--show-failures", action="store_true", help="Print mismatch detail")
 
     add("corrupt", cmd_corrupt, help="Inject the 3 demo defects")
     add("fix", cmd_fix, help="Correct the 3 demo defects")

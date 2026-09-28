@@ -127,7 +127,7 @@ If it fails, jump to Troubleshooting at the bottom.
 
 ## 7. Run it
 
-**Everything at once** — creates tables, seeds 18 test cases across 7 folders,
+**Everything at once** — creates tables, seeds 25 test cases across 7 folders,
 loads the data, injects 3 defects, validates, corrects, reruns:
 
 ```bash
@@ -158,7 +158,8 @@ The left sidebar has five pages:
 pytest -q
 ```
 
-173 should pass, 5 skip.
+179 should pass and 7 skip. With `pip install duckdb` it's 200 passing: the
+extra 21 run the transformation and curated scripts end to end.
 
 ---
 

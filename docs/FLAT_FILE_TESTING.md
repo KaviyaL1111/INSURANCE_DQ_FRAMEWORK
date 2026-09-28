@@ -1,14 +1,16 @@
 # Testing the flat-file features
 
-A step-by-step guide for trying the flat-file connection and **Load into
-staging** on your own machine. It takes about 20 minutes.
+A step-by-step guide for trying the flat-file connection, **Load into
+staging** and **Promote to curated** on your own machine. It takes about 30
+minutes.
 
-## What the two features do
+## What the features do
 
 | | Writes to the database? | What it's for |
 |---|---|---|
 | **Upload / browse / query a file** | No | The file is saved to the flat-file folder (`data/` by default) and read as a table: `claim.csv` → `CLAIM`. Use it as the source or target of a test case. |
 | **Load into staging** | **Yes** | Inserts the file's rows into `STG_CUSTOMER`, `STG_POLICY` or `STG_CLAIM` for a batch ID, so the pipeline and test cases run on your data. |
+| **Promote to curated** | **Yes** | Applies the transformation rules to everything staged for the batch, merges it into `POLICY_MASTER` / `CLAIM_MASTER` / `CUSTOMER_360`, then runs the source-to-target, historical and incremental test cases. |
 
 ## 0 · Set up
 
@@ -78,7 +80,52 @@ Each one must show a red message naming the column and the row, and the
 **Load** button must not appear. A **duplicate** `CLAIM_ID` is only a yellow
 warning. It loads, and the *Duplicate … check* test cases should then catch it.
 
-## 3 · Compare a file with Snowflake
+## 3 · Promote to curated and validate
+
+Stay on the **Load into staging & curated** tab after loading all three
+files for one batch.
+
+1. Under **Transform and load into curated**, check the staged row counts.
+   Tick the box and press **Promote to curated**.
+   - [ ] the table shows the same count staged, transformed and in curated
+     for each of customer, policy and claim
+2. Leave `history_start` / `history_end` at their defaults (the dates the
+   batch covers). Press **Run /Source-to-Target, /Historical, /Incremental
+   on this batch**.
+   - [ ] every test case passes: 6 source-to-target, 3 historical, 4 incremental
+3. Press **Promote to curated** again. The counts must stay the same, not
+   double.
+
+### A delta file (new batch)
+
+Set the sidebar batch ID to a new value, e.g. `BATCH_20260915_002`. Make a
+copy of `claims.csv` with five rows, a later `LAST_UPDATED_TS`
+(`2026-09-14 09:00:00`) and a different `CLAIM_STATUS`. Load only that
+file, then promote and validate.
+
+- [ ] no claim is reported as dropped: their policies are already in curated
+- [ ] every curated test case passes
+- [ ] **Incremental claim watermark boundary** passes, while the policy and
+      customer watermarks are left alone (see *Watermark status report*)
+
+### Things the curated checks must catch
+
+- [ ] **Re-sent data**: under another new batch, load the original
+      `policies.csv` rows unchanged. **Incremental watermark boundary**
+      fails for each one: *not newer than the previous batch's watermark*.
+- [ ] **Out-of-order load**: load a policy with a *later* timestamp and a
+      new premium, promote it, then load the same policy with an *earlier*
+      timestamp under another batch and promote that. **Historical policy
+      reconciliation** fails on `PREMIUM_AMOUNT`: curated holds the older
+      value.
+- [ ] **Unknown policy**: a claims file whose `POLICY_ID` exists nowhere.
+      A yellow warning names the claims that won't reach curated, and
+      **Claim references an existing policy** in `/Staging` fails.
+- [ ] **Duplicate key**: a file with the same `POLICY_ID` twice loads into
+      staging with a warning, but promotion is refused in red and nothing
+      reaches curated.
+
+## 4 · Compare a file with Snowflake
 
 **Create a reconciliation test**: source = your file, target = `STG_CLAIM`,
 key = `CLAIM_ID`. Save it, then run it from **Test Cases**.
@@ -93,6 +140,8 @@ key = `CLAIM_ID`. Save it, then run it from **Test Cases**.
 python -m src.cli load-file my_claims.csv --dry-run   # checks only
 python -m src.cli load-file my_claims.csv              # loads into STG_CLAIM
 python -m src.cli load-file c.csv --table STG_CUSTOMER --append
+python -m src.cli promote --show-failures              # staged batch -> curated, then validate
+python -m src.cli load-file my_claims.csv --promote    # both in one go
 python -m src.cli --connection flatfile doctor         # lists the tables it reads
 ```
 

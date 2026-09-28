@@ -1,251 +1,183 @@
 -- =====================================================================
-
 -- 04_curated_merge_load.sql
-
 -- Transformation -> Curated. Business-key MERGE (SCD Type 1) into
-
 -- POLICY_MASTER, CLAIM_MASTER and CUSTOMER_360.
-
+-- A batch may carry only some entities (e.g. a claims-only file), so
+-- nothing here assumes all three were staged together.
 -- =====================================================================
 
- 
-
 -- ---------- POLICY_MASTER ----------
-
 MERGE INTO POLICY_MASTER AS T
-
 USING (
-
     SELECT POLICY_ID, CUSTOMER_ID, POLICY_TYPE_DESC, POLICY_STATUS_DESC,
-
            PREMIUM_AMOUNT, ISSUE_DATE, EXPIRY_DATE, RECORD_EFFECTIVE_TS
-
     FROM TRN_POLICY
-
     WHERE BATCH_ID = :batch_id
-
 ) AS S
-
 ON T.POLICY_ID = S.POLICY_ID
-
 WHEN MATCHED THEN UPDATE SET
-
     T.CUSTOMER_ID     = S.CUSTOMER_ID,
-
     T.POLICY_TYPE     = S.POLICY_TYPE_DESC,
-
     T.POLICY_STATUS   = S.POLICY_STATUS_DESC,
-
     T.PREMIUM_AMOUNT  = S.PREMIUM_AMOUNT,
-
     T.ISSUE_DATE      = S.ISSUE_DATE,
-
     T.EXPIRY_DATE     = S.EXPIRY_DATE,
-
     T.LAST_UPDATED_TS = S.RECORD_EFFECTIVE_TS
-
 WHEN NOT MATCHED THEN INSERT
-
     (POLICY_ID, CUSTOMER_ID, POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT,
-
      ISSUE_DATE, EXPIRY_DATE, LAST_UPDATED_TS)
-
 VALUES
-
     (S.POLICY_ID, S.CUSTOMER_ID, S.POLICY_TYPE_DESC, S.POLICY_STATUS_DESC, S.PREMIUM_AMOUNT,
-
      S.ISSUE_DATE, S.EXPIRY_DATE, S.RECORD_EFFECTIVE_TS);
 
- 
-
 -- ---------- CLAIM_MASTER ----------
-
 MERGE INTO CLAIM_MASTER AS T
-
 USING (
-
     SELECT CLAIM_ID, POLICY_ID, CLAIM_DATE, CLAIM_AMOUNT, APPROVED_AMOUNT,
-
            CLAIM_STATUS_DESC, CLAIM_RATIO, RECORD_EFFECTIVE_TS
-
     FROM TRN_CLAIM
-
     WHERE BATCH_ID = :batch_id
-
 ) AS S
-
 ON T.CLAIM_ID = S.CLAIM_ID
-
 WHEN MATCHED THEN UPDATE SET
-
     T.POLICY_ID       = S.POLICY_ID,
-
     T.CLAIM_DATE      = S.CLAIM_DATE,
-
     T.CLAIM_AMOUNT    = S.CLAIM_AMOUNT,
-
     T.APPROVED_AMOUNT = S.APPROVED_AMOUNT,
-
     T.CLAIM_STATUS    = S.CLAIM_STATUS_DESC,
-
     T.CLAIM_RATIO     = S.CLAIM_RATIO,
-
     T.LAST_UPDATED_TS = S.RECORD_EFFECTIVE_TS
-
 WHEN NOT MATCHED THEN INSERT
-
     (CLAIM_ID, POLICY_ID, CLAIM_DATE, CLAIM_AMOUNT, APPROVED_AMOUNT,
-
      CLAIM_STATUS, CLAIM_RATIO, LAST_UPDATED_TS)
-
 VALUES
-
     (S.CLAIM_ID, S.POLICY_ID, S.CLAIM_DATE, S.CLAIM_AMOUNT, S.APPROVED_AMOUNT,
-
      S.CLAIM_STATUS_DESC, S.CLAIM_RATIO, S.RECORD_EFFECTIVE_TS);
 
- 
-
 -- ---------- CUSTOMER_360 ----------
-
 -- Premium and claim aggregates are computed in separate sub-queries and
-
 -- joined 1:1, so a customer with several policies AND several claims does
-
 -- not fan the two aggregates into each other.
-
 MERGE INTO CUSTOMER_360 AS T
-
 USING (
-
     SELECT
-
         C.CUSTOMER_ID,
-
         C.CUSTOMER_NAME,
-
         C.EMAIL,
-
         COALESCE(POL.TOTAL_PREMIUM, 0)     AS TOTAL_PREMIUM,
-
         COALESCE(CLM.CLAIM_COUNT, 0)       AS TOTAL_CLAIMS,
-
         COALESCE(CLM.CLAIM_AMOUNT_SUM, 0)  AS TOTAL_CLAIM_AMOUNT,
-
         C.RECORD_EFFECTIVE_TS
-
     FROM TRN_CUSTOMER C
-
     LEFT JOIN (
-
         SELECT CUSTOMER_ID, SUM(PREMIUM_AMOUNT) AS TOTAL_PREMIUM
-
         FROM POLICY_MASTER
-
         GROUP BY CUSTOMER_ID
-
     ) POL ON POL.CUSTOMER_ID = C.CUSTOMER_ID
-
     LEFT JOIN (
-
         SELECT P.CUSTOMER_ID,
-
                COUNT(CM.CLAIM_ID)   AS CLAIM_COUNT,
-
                SUM(CM.CLAIM_AMOUNT) AS CLAIM_AMOUNT_SUM
-
         FROM POLICY_MASTER P
-
         JOIN CLAIM_MASTER CM ON CM.POLICY_ID = P.POLICY_ID
-
         GROUP BY P.CUSTOMER_ID
-
     ) CLM ON CLM.CUSTOMER_ID = C.CUSTOMER_ID
-
     WHERE C.BATCH_ID = :batch_id
-
 ) AS S
-
 ON T.CUSTOMER_ID = S.CUSTOMER_ID
-
 WHEN MATCHED THEN UPDATE SET
-
     T.CUSTOMER_NAME      = S.CUSTOMER_NAME,
-
     T.EMAIL              = S.EMAIL,
-
     T.TOTAL_PREMIUM      = S.TOTAL_PREMIUM,
-
     T.TOTAL_CLAIMS       = S.TOTAL_CLAIMS,
-
     T.TOTAL_CLAIM_AMOUNT = S.TOTAL_CLAIM_AMOUNT,
-
     T.LAST_UPDATED_TS    = S.RECORD_EFFECTIVE_TS
-
 WHEN NOT MATCHED THEN INSERT
-
     (CUSTOMER_ID, CUSTOMER_NAME, EMAIL, TOTAL_PREMIUM, TOTAL_CLAIMS,
-
      TOTAL_CLAIM_AMOUNT, LAST_UPDATED_TS)
-
 VALUES
-
     (S.CUSTOMER_ID, S.CUSTOMER_NAME, S.EMAIL, S.TOTAL_PREMIUM, S.TOTAL_CLAIMS,
-
      S.TOTAL_CLAIM_AMOUNT, S.RECORD_EFFECTIVE_TS);
 
- 
-
--- ---------- Watermark ----------
-
--- Records the incremental window this batch covered, so the incremental
-
--- validation has real boundaries to check instead of an empty table.
-
-MERGE INTO DQ_WATERMARK AS T
-
+-- ---------- CUSTOMER_360 aggregates ----------
+-- A batch of policies or claims alone changes the totals of customers it
+-- didn't restage. Recompute every customer's totals from the curated
+-- detail; the customer's own attributes and LAST_UPDATED_TS are untouched.
+MERGE INTO CUSTOMER_360 AS T
 USING (
-
-    SELECT 'POLICY_CURATED_LOAD' AS PROCESS_NAME,
-
-           MIN(RECORD_EFFECTIVE_TS) AS PREVIOUS_WATERMARK,
-
-           MAX(RECORD_EFFECTIVE_TS) AS BATCH_HIGH_WATERMARK,
-
-           :batch_id AS LAST_BATCH_ID,
-
-           COUNT(*) AS ROWS_PROCESSED
-
-    FROM TRN_POLICY WHERE BATCH_ID = :batch_id
-
+    SELECT
+        C.CUSTOMER_ID,
+        COALESCE(POL.TOTAL_PREMIUM, 0)     AS TOTAL_PREMIUM,
+        COALESCE(CLM.CLAIM_COUNT, 0)       AS TOTAL_CLAIMS,
+        COALESCE(CLM.CLAIM_AMOUNT_SUM, 0)  AS TOTAL_CLAIM_AMOUNT
+    FROM CUSTOMER_360 C
+    LEFT JOIN (
+        SELECT CUSTOMER_ID, SUM(PREMIUM_AMOUNT) AS TOTAL_PREMIUM
+        FROM POLICY_MASTER
+        GROUP BY CUSTOMER_ID
+    ) POL ON POL.CUSTOMER_ID = C.CUSTOMER_ID
+    LEFT JOIN (
+        SELECT P.CUSTOMER_ID,
+               COUNT(CM.CLAIM_ID)   AS CLAIM_COUNT,
+               SUM(CM.CLAIM_AMOUNT) AS CLAIM_AMOUNT_SUM
+        FROM POLICY_MASTER P
+        JOIN CLAIM_MASTER CM ON CM.POLICY_ID = P.POLICY_ID
+        GROUP BY P.CUSTOMER_ID
+    ) CLM ON CLM.CUSTOMER_ID = C.CUSTOMER_ID
 ) AS S
-
-ON T.PROCESS_NAME = S.PROCESS_NAME
-
+ON T.CUSTOMER_ID = S.CUSTOMER_ID
 WHEN MATCHED THEN UPDATE SET
+    T.TOTAL_PREMIUM      = S.TOTAL_PREMIUM,
+    T.TOTAL_CLAIMS       = S.TOTAL_CLAIMS,
+    T.TOTAL_CLAIM_AMOUNT = S.TOTAL_CLAIM_AMOUNT;
 
-    T.PREVIOUS_WATERMARK   = S.PREVIOUS_WATERMARK,
-
+-- ---------- Watermarks ----------
+-- One per entity, and only for entities the batch actually carried, so a
+-- claims-only file leaves the policy watermark alone.
+--
+-- The window a batch is validated against runs from PREVIOUS_WATERMARK
+-- (exclusive) to BATCH_HIGH_WATERMARK:
+--   * a new batch starts where the last batch ended, so a record that was
+--     already processed and is sent again falls outside it;
+--   * reloading the same batch keeps the start it was first given.
+-- Older versions of this script stored the batch's own minimum as
+-- PREVIOUS_WATERMARK; a row still in that state is reset to no lower bound.
+MERGE INTO DQ_WATERMARK AS T
+USING (
+    SELECT 'POLICY_CURATED_LOAD' AS PROCESS_NAME,
+           MIN(RECORD_EFFECTIVE_TS) AS BATCH_LOW_WATERMARK,
+           MAX(RECORD_EFFECTIVE_TS) AS BATCH_HIGH_WATERMARK,
+           COUNT(*) AS ROWS_PROCESSED
+    FROM TRN_POLICY WHERE BATCH_ID = :batch_id
+    HAVING COUNT(*) > 0
+    UNION ALL
+    SELECT 'CLAIM_CURATED_LOAD',
+           MIN(RECORD_EFFECTIVE_TS), MAX(RECORD_EFFECTIVE_TS), COUNT(*)
+    FROM TRN_CLAIM WHERE BATCH_ID = :batch_id
+    HAVING COUNT(*) > 0
+    UNION ALL
+    SELECT 'CUSTOMER_CURATED_LOAD',
+           MIN(RECORD_EFFECTIVE_TS), MAX(RECORD_EFFECTIVE_TS), COUNT(*)
+    FROM TRN_CUSTOMER WHERE BATCH_ID = :batch_id
+    HAVING COUNT(*) > 0
+) AS S
+ON T.PROCESS_NAME = S.PROCESS_NAME
+WHEN MATCHED THEN UPDATE SET
+    T.PREVIOUS_WATERMARK   = CASE
+                                 WHEN T.LAST_BATCH_ID IS NULL
+                                   OR T.LAST_BATCH_ID <> :batch_id THEN T.BATCH_HIGH_WATERMARK
+                                 WHEN T.PREVIOUS_WATERMARK = S.BATCH_LOW_WATERMARK THEN NULL
+                                 ELSE T.PREVIOUS_WATERMARK
+                             END,
     T.BATCH_HIGH_WATERMARK = S.BATCH_HIGH_WATERMARK,
-
-    T.LAST_BATCH_ID        = S.LAST_BATCH_ID,
-
+    T.LAST_BATCH_ID        = :batch_id,
     T.ROWS_PROCESSED       = S.ROWS_PROCESSED,
-
     T.LOAD_STATUS          = 'SUCCESS',
-
     T.VALIDATION_STATUS    = 'PENDING',
-
     T.UPDATED_TS           = CURRENT_TIMESTAMP()
-
 WHEN NOT MATCHED THEN INSERT
-
     (PROCESS_NAME, PREVIOUS_WATERMARK, BATCH_HIGH_WATERMARK, LAST_BATCH_ID,
-
      ROWS_PROCESSED, LOAD_STATUS, VALIDATION_STATUS)
-
 VALUES
-
-    (S.PROCESS_NAME, S.PREVIOUS_WATERMARK, S.BATCH_HIGH_WATERMARK, S.LAST_BATCH_ID,
-
+    (S.PROCESS_NAME, NULL, S.BATCH_HIGH_WATERMARK, :batch_id,
      S.ROWS_PROCESSED, 'SUCCESS', 'PENDING');

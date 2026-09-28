@@ -58,7 +58,9 @@ WHERE BATCH_ID = :batch_id
 
 -- ---------- TRN_CLAIM ----------
 -- CLM-001 status decode | CLM-002 claim ratio | CLM-003 outstanding amount
--- CLM-004 claim year-month | CLM-005 carry claim date | CLM-006 keep only linked claims
+-- CLM-004 claim year-month | CLM-005 carry claim date
+-- CLM-006 keep only linked claims: the policy is in this batch, or was loaded
+--         to curated by an earlier one (a claims-only delta file)
 INSERT INTO TRN_CLAIM (CLAIM_ID, POLICY_ID, CLAIM_STATUS_DESC, CLAIM_RATIO, OUTSTANDING_AMOUNT,
                        CLAIM_YEAR_MONTH, CLAIM_DATE, CLAIM_AMOUNT, APPROVED_AMOUNT,
                        RECORD_EFFECTIVE_TS, BATCH_ID)
@@ -83,5 +85,6 @@ SELECT
 FROM STG_CLAIM S
 WHERE S.BATCH_ID = :batch_id
   AND S.CLAIM_ID IS NOT NULL
-  AND EXISTS (SELECT 1 FROM STG_POLICY P
-              WHERE P.POLICY_ID = S.POLICY_ID AND P.BATCH_ID = S.BATCH_ID);
+  AND (EXISTS (SELECT 1 FROM STG_POLICY P
+               WHERE P.POLICY_ID = S.POLICY_ID AND P.BATCH_ID = S.BATCH_ID)
+       OR EXISTS (SELECT 1 FROM POLICY_MASTER M WHERE M.POLICY_ID = S.POLICY_ID));

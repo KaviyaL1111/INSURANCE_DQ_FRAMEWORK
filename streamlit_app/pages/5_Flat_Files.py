@@ -18,6 +18,8 @@ from src.config import available_connections
 from src.connectors.base import extract_params
 from src.connectors.flatfile_connector import SUPPORTED_EXTENSIONS, safe_filename, table_name_for
 from src.repository import DuplicateNameError, SEVERITIES, TestCase
+from src.curated import (LAYERS, VALIDATION_FOLDERS, check_for_promotion, promote_to_curated,
+                         validate_curated)
 from src.staging import (STAGING_TABLES, check_for_staging, guess_staging_table,
                          load_to_staging, read_file_as_text)
 
@@ -146,7 +148,7 @@ if not tables:
     st.stop()
 
 browse_tab, sql_tab, load_tab, build_tab = st.tabs(
-    ["🔎 Browse & profile", "🧮 SQL query", "⬆ Load into staging",
+    ["🔎 Browse & profile", "🧮 SQL query", "⬆ Load into staging & curated",
      "🧪 Create a reconciliation test"])
 
 by_name = {t["table"]: t for t in tables}
@@ -225,6 +227,12 @@ with sql_tab:
 @st.cache_data(show_spinner="Checking the file…", max_entries=16)
 def _read_for_staging(signature: tuple, path: str):
     return read_file_as_text(path)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _promotion_check(connection: str, batch: str, nonce: int):
+    """Re-queried only when the batch changes or something was loaded or promoted."""
+    return check_for_promotion(get_repository().db, batch)
 
 
 with load_tab:
@@ -323,6 +331,95 @@ with load_tab:
             show_results(results)
         elif not staging_folder:
             st.caption("Next: run your staging test cases from the **Test Cases** page.")
+
+    # ---------------------------------------------- step 2: promote to curated
+    st.divider()
+    st.markdown("#### Transform and load into curated")
+    st.caption("Applies the mapping rules to everything staged for the batch "
+               "(`03_transform_load.sql`), merges it into POLICY_MASTER, CLAIM_MASTER and "
+               "CUSTOMER_360 (`04_curated_merge_load.sql`) in one transaction, and then runs the "
+               "**/Source-to-Target**, **/Historical** and **/Incremental** test cases on it.")
+    promote_batch = load_batch.strip()
+    nonce = st.session_state.get("stg_loads", 0) + st.session_state.get("cur_promotions", 0)
+    try:
+        pcheck = _promotion_check(repo_db.profile.name, promote_batch, nonce)
+    except Exception as exc:
+        msg = str(exc)
+        if "does not exist" in msg.lower() or "no such table" in msg.lower():
+            msg += ("\n\nThe pipeline tables haven't been created yet: use **Create tables** "
+                    "on the Demo Pipeline page, or run `python -m src.cli init`.")
+        st.error(f"Could not check batch {promote_batch}: {msg}")
+        pcheck = None
+
+    if pcheck is not None:
+        st.dataframe(pd.DataFrame([{"Staging table": t, "Rows staged for this batch": n}
+                                   for t, n in pcheck.staged.items()]),
+                     use_container_width=True, hide_index=True)
+        for e in pcheck.errors:
+            st.error(e)
+        for w in pcheck.warnings:
+            st.warning(w)
+        if pcheck.ok:
+            confirm = st.checkbox(
+                f"Transform batch **{promote_batch}** and merge it into the curated tables in "
+                f"**{repo_db.profile.name}**",
+                key=f"cur_confirm_{st.session_state.get('cur_promotions', 0)}")
+            if st.button("⬆ Promote to curated", type="primary", disabled=not confirm):
+                try:
+                    with st.spinner("Applying the transformation rules and merging…"):
+                        out = promote_to_curated(repo_db, promote_batch)
+                except Exception as exc:
+                    st.error(f"Nothing was promoted — the change was rolled back.\n\n{exc}")
+                else:
+                    st.session_state["cur_last"] = out
+                    st.session_state.pop("cur_results", None)
+                    st.session_state["cur_promotions"] = (
+                        st.session_state.get("cur_promotions", 0) + 1)
+                    st.rerun()
+
+    done = st.session_state.get("cur_last")
+    if done and done["batch_id"] == promote_batch:
+        st.success(f"Batch {done['batch_id']} is in curated.")
+        st.dataframe(pd.DataFrame([{
+            "Tables": f"{stg} → {trn} → {cur}",
+            "Staged": done["staged"][stg],
+            "Transformed": done["transformed"][trn],
+            "In curated": done["curated"][cur],
+        } for stg, (trn, cur) in LAYERS.items()]), use_container_width=True, hide_index=True)
+        if done["dropped_claims"]:
+            st.warning(f"{len(done['dropped_claims'])} claim(s) did not reach curated (no known "
+                       f"policy): {', '.join(done['dropped_claims'][:10])}")
+
+        st.markdown("**Validate curated**")
+        window = done["window"]
+        c1, c2 = st.columns(2)
+        h_start = c1.date_input("history_start",
+                                value=pd.Timestamp(window[0]).date() if window else None,
+                                key=f"cur_hs_{promote_batch}",
+                                help="The historical checks cover records effective in this "
+                                     "range. It defaults to the dates this batch covers.")
+        h_end = c2.date_input("history_end",
+                              value=pd.Timestamp(window[1]).date() if window else None,
+                              key=f"cur_he_{promote_batch}")
+        if project is None:
+            st.info("Pick or create a project in the sidebar to run its curated test cases.")
+        elif st.button(f"▶ Run {', '.join(VALIDATION_FOLDERS)} on this batch"):
+            chosen = ((h_start.isoformat(), h_end.isoformat()) if h_start and h_end else None)
+            with st.spinner("Validating…"):
+                st.session_state["cur_results"] = (promote_batch, validate_curated(
+                    get_engine(), project["PROJECT_ID"], promote_batch, window=chosen))
+
+        ran = st.session_state.get("cur_results")
+        if ran and ran[0] == promote_batch:
+            by_folder = ran[1]
+            st.dataframe(pd.DataFrame([{
+                "Folder": path,
+                "Test cases": len(res) if res is not None else "—",
+                "Passed": sum(r.status == "PASS" for r in res) if res is not None else "—",
+                "Not passed": sum(r.status != "PASS" for r in res) if res is not None
+                else "folder missing",
+            } for path, res in by_folder.items()]), use_container_width=True, hide_index=True)
+            show_results([r for res in by_folder.values() if res for r in res])
 
 # ------------------------------------------------------ test-case builder
 with build_tab:

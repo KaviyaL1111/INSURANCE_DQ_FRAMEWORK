@@ -89,3 +89,22 @@ def test_full_suite_is_green_after_correction(project, reg):
                                 for r in outcome.results if r.status != "PASS"]
     summary = reg.history.dashboard_summary(project["PROJECT_ID"])
     assert summary["failed"] == 0 and summary["pass_pct"] == 100.0
+
+
+def test_flat_files_promoted_to_curated_pass_the_curated_checks(project, reg):
+    """The Flat Files path: file -> STG_* -> transformation rules -> curated -> validate."""
+    from src.config import ROOT_DIR
+    from src.curated import promote_to_curated, validate_curated
+    from src.staging import STAGING_TABLES, load_to_staging, read_file_as_text
+
+    db = reg.repo.db
+    for table, (filename, _) in STAGING_TABLES.items():
+        cols, rows = read_file_as_text(os.path.join(ROOT_DIR, "data", filename))
+        load_to_staging(db, table, cols, rows, BATCH, source_file=filename)
+    out = promote_to_curated(db, BATCH)
+    assert out["curated"] == {"CUSTOMER_360": 30, "POLICY_MASTER": 40, "CLAIM_MASTER": 50}
+
+    results = validate_curated(reg.engine, project["PROJECT_ID"], BATCH, window=out["window"])
+    failing = [(r.test_name, r.status, r.error_message)
+               for res in results.values() for r in res if r.status != "PASS"]
+    assert not failing, failing

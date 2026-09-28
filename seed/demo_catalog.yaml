@@ -117,7 +117,10 @@ test_cases:
 
   - folder: /Staging
     name: Claim references an existing policy
-    description: Every staged claim must point at a policy in the same batch.
+    description: >-
+      Every staged claim must point at a policy in the same batch or one
+      already in POLICY_MASTER. Claims that don't are dropped by rule CLM-006
+      and never reach curated.
     test_type: SQL_ROWCOUNT
     scope: GENERIC
     entity: Claim
@@ -128,11 +131,12 @@ test_cases:
              'POLICY_ID' AS COLUMN_NAME,
              'an existing policy id' AS EXPECTED_VALUE,
              C.POLICY_ID AS ACTUAL_VALUE,
-             'Claim references a policy that is not in the batch' AS FAILURE_REASON
+             'Claim references a policy that is neither in the batch nor in curated' AS FAILURE_REASON
       FROM STG_CLAIM C
       LEFT JOIN STG_POLICY P
              ON P.POLICY_ID = C.POLICY_ID AND P.BATCH_ID = C.BATCH_ID
-      WHERE C.BATCH_ID = :batch_id AND P.POLICY_ID IS NULL
+      LEFT JOIN POLICY_MASTER M ON M.POLICY_ID = C.POLICY_ID
+      WHERE C.BATCH_ID = :batch_id AND P.POLICY_ID IS NULL AND M.POLICY_ID IS NULL
 
   - folder: /Staging
     name: Approved amount within claim amount
@@ -295,33 +299,157 @@ test_cases:
 
   - folder: /Source-to-Target
     name: Customer 360 aggregate reconciliation
-    description: Curated customer aggregates must agree with the curated detail they summarise.
+    description: >-
+      Curated customer aggregates must agree with the curated detail they
+      summarise — for every customer the batch touched, including customers
+      whose policies or claims arrived without a customer record.
     test_type: SOURCE_TARGET_COMPARE
     scope: SOURCE_TO_TARGET
     entity: Customer
     layer: Curated
     severity: High
     key_columns: CUSTOMER_ID
-    compare_columns: TOTAL_PREMIUM, TOTAL_CLAIMS
+    compare_columns: TOTAL_PREMIUM, TOTAL_CLAIMS, TOTAL_CLAIM_AMOUNT
     tolerance: 0.01
     source_sql: |
       SELECT C.CUSTOMER_ID,
-             COALESCE(POL.TOTAL_PREMIUM, 0) AS TOTAL_PREMIUM,
-             COALESCE(CLM.CLAIM_COUNT, 0)   AS TOTAL_CLAIMS
-      FROM TRN_CUSTOMER C
+             COALESCE(POL.TOTAL_PREMIUM, 0)    AS TOTAL_PREMIUM,
+             COALESCE(CLM.CLAIM_COUNT, 0)      AS TOTAL_CLAIMS,
+             COALESCE(CLM.CLAIM_AMOUNT_SUM, 0) AS TOTAL_CLAIM_AMOUNT
+      FROM (SELECT CUSTOMER_ID FROM TRN_CUSTOMER WHERE BATCH_ID = :batch_id
+            UNION
+            SELECT CUSTOMER_ID FROM CUSTOMER_360
+            WHERE CUSTOMER_ID IN (SELECT CUSTOMER_ID FROM TRN_POLICY WHERE BATCH_ID = :batch_id
+                                  UNION
+                                  SELECT P.CUSTOMER_ID FROM TRN_CLAIM T
+                                  JOIN POLICY_MASTER P ON P.POLICY_ID = T.POLICY_ID
+                                  WHERE T.BATCH_ID = :batch_id)) C
       LEFT JOIN (SELECT CUSTOMER_ID, SUM(PREMIUM_AMOUNT) AS TOTAL_PREMIUM
                  FROM POLICY_MASTER GROUP BY CUSTOMER_ID) POL
              ON POL.CUSTOMER_ID = C.CUSTOMER_ID
-      LEFT JOIN (SELECT P.CUSTOMER_ID, COUNT(CM.CLAIM_ID) AS CLAIM_COUNT
+      LEFT JOIN (SELECT P.CUSTOMER_ID, COUNT(CM.CLAIM_ID) AS CLAIM_COUNT,
+                        SUM(CM.CLAIM_AMOUNT) AS CLAIM_AMOUNT_SUM
                  FROM POLICY_MASTER P
                  JOIN CLAIM_MASTER CM ON CM.POLICY_ID = P.POLICY_ID
                  GROUP BY P.CUSTOMER_ID) CLM
              ON CLM.CUSTOMER_ID = C.CUSTOMER_ID
-      WHERE C.BATCH_ID = :batch_id
     target_sql: |
-      SELECT CUSTOMER_ID, TOTAL_PREMIUM, TOTAL_CLAIMS
+      SELECT CUSTOMER_ID, TOTAL_PREMIUM, TOTAL_CLAIMS, TOTAL_CLAIM_AMOUNT
       FROM CUSTOMER_360
-      WHERE CUSTOMER_ID IN (SELECT CUSTOMER_ID FROM TRN_CUSTOMER WHERE BATCH_ID = :batch_id)
+      WHERE CUSTOMER_ID IN (SELECT CUSTOMER_ID FROM TRN_CUSTOMER WHERE BATCH_ID = :batch_id
+                            UNION
+                            SELECT CUSTOMER_ID FROM TRN_POLICY WHERE BATCH_ID = :batch_id
+                            UNION
+                            SELECT P.CUSTOMER_ID FROM TRN_CLAIM T
+                            JOIN POLICY_MASTER P ON P.POLICY_ID = T.POLICY_ID
+                            WHERE T.BATCH_ID = :batch_id)
+
+  # End to end: the mapping rules are re-derived from the raw staged rows and
+  # compared with curated, so a wrong rule in 03_transform_load.sql is caught
+  # even though transformation and curated would agree with each other.
+  - folder: /Source-to-Target
+    name: Policy staging vs curated (mapping rules)
+    description: >-
+      Applies POL-001..005 to the staged policies of the batch and reconciles
+      the result row by row with POLICY_MASTER.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: SOURCE_TO_TARGET
+    entity: Policy
+    layer: Curated
+    severity: Critical
+    key_columns: POLICY_ID
+    compare_columns: CUSTOMER_ID, POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT, ISSUE_DATE, EXPIRY_DATE
+    source_sql: |
+      SELECT TRIM(POLICY_ID)   AS POLICY_ID,
+             TRIM(CUSTOMER_ID) AS CUSTOMER_ID,
+             CASE UPPER(TRIM(POLICY_TYPE))
+                 WHEN 'AUTO'   THEN 'Automobile'
+                 WHEN 'HOME'   THEN 'Home Insurance'
+                 WHEN 'HEALTH' THEN 'Health Insurance'
+                 WHEN 'LIFE'   THEN 'Life Insurance'
+                 ELSE 'Unknown'
+             END AS POLICY_TYPE,
+             CASE UPPER(TRIM(POLICY_STATUS))
+                 WHEN 'A' THEN 'Active'
+                 WHEN 'I' THEN 'Inactive'
+                 WHEN 'C' THEN 'Cancelled'
+                 WHEN 'L' THEN 'Lapsed'
+                 ELSE 'Unknown'
+             END AS POLICY_STATUS,
+             ROUND(PREMIUM_AMOUNT, 2) AS PREMIUM_AMOUNT,
+             ISSUE_DATE,
+             EXPIRY_DATE
+      FROM STG_POLICY
+      WHERE BATCH_ID = :batch_id
+        AND POLICY_ID IS NOT NULL
+    target_sql: |
+      SELECT POLICY_ID, CUSTOMER_ID, POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT,
+             ISSUE_DATE, EXPIRY_DATE
+      FROM POLICY_MASTER
+      WHERE POLICY_ID IN (SELECT TRIM(POLICY_ID) FROM STG_POLICY WHERE BATCH_ID = :batch_id)
+
+  - folder: /Source-to-Target
+    name: Claim staging vs curated (mapping rules)
+    description: >-
+      Applies CLM-001..006 to the staged claims of the batch and reconciles
+      the result row by row with CLAIM_MASTER. Claims CLM-006 drops (no known
+      policy) are expected to be absent; the /Staging linkage test lists them.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: SOURCE_TO_TARGET
+    entity: Claim
+    layer: Curated
+    severity: Critical
+    key_columns: CLAIM_ID
+    compare_columns: POLICY_ID, CLAIM_DATE, CLAIM_STATUS, CLAIM_AMOUNT, APPROVED_AMOUNT, CLAIM_RATIO
+    source_sql: |
+      SELECT S.CLAIM_ID,
+             S.POLICY_ID,
+             S.CLAIM_DATE,
+             CASE UPPER(TRIM(S.CLAIM_STATUS))
+                 WHEN 'P' THEN 'Pending'
+                 WHEN 'A' THEN 'Approved'
+                 WHEN 'R' THEN 'Rejected'
+                 WHEN 'S' THEN 'Settled'
+                 ELSE 'Unknown'
+             END AS CLAIM_STATUS,
+             S.CLAIM_AMOUNT,
+             COALESCE(S.APPROVED_AMOUNT, 0) AS APPROVED_AMOUNT,
+             ROUND(COALESCE(S.APPROVED_AMOUNT / NULLIF(S.CLAIM_AMOUNT, 0), 0), 4) AS CLAIM_RATIO
+      FROM STG_CLAIM S
+      WHERE S.BATCH_ID = :batch_id
+        AND S.CLAIM_ID IS NOT NULL
+        AND (EXISTS (SELECT 1 FROM STG_POLICY P
+                     WHERE P.POLICY_ID = S.POLICY_ID AND P.BATCH_ID = S.BATCH_ID)
+             OR EXISTS (SELECT 1 FROM POLICY_MASTER M WHERE M.POLICY_ID = S.POLICY_ID))
+    target_sql: |
+      SELECT CLAIM_ID, POLICY_ID, CLAIM_DATE, CLAIM_STATUS, CLAIM_AMOUNT, APPROVED_AMOUNT,
+             CLAIM_RATIO
+      FROM CLAIM_MASTER
+      WHERE CLAIM_ID IN (SELECT CLAIM_ID FROM STG_CLAIM WHERE BATCH_ID = :batch_id)
+
+  - folder: /Source-to-Target
+    name: Customer staging vs curated (mapping rules)
+    description: >-
+      Applies CUS-001..003 to the staged customers of the batch and reconciles
+      the result row by row with CUSTOMER_360.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: SOURCE_TO_TARGET
+    entity: Customer
+    layer: Curated
+    severity: High
+    key_columns: CUSTOMER_ID
+    compare_columns: CUSTOMER_NAME, EMAIL
+    source_sql: |
+      SELECT TRIM(CUSTOMER_ID) AS CUSTOMER_ID,
+             COALESCE(NULLIF(UPPER(TRIM(CUSTOMER_NAME)), ''), 'UNKNOWN') AS CUSTOMER_NAME,
+             LOWER(TRIM(EMAIL)) AS EMAIL
+      FROM STG_CUSTOMER
+      WHERE BATCH_ID = :batch_id
+        AND CUSTOMER_ID IS NOT NULL
+    target_sql: |
+      SELECT CUSTOMER_ID, CUSTOMER_NAME, EMAIL
+      FROM CUSTOMER_360
+      WHERE CUSTOMER_ID IN (SELECT TRIM(CUSTOMER_ID) FROM STG_CUSTOMER WHERE BATCH_ID = :batch_id)
 
   # ------------------------------------------------------------- Linkage
   - folder: /Linkage
@@ -366,8 +494,12 @@ test_cases:
   - folder: /Incremental
     name: Incremental watermark boundary
     description: >-
-      Every record loaded by the batch must fall inside the committed
-      watermark window — nothing before it, nothing after it.
+      Every policy record the batch loaded must be newer than the
+      previous batch's high watermark (otherwise already-processed data was
+      sent again) and no later than the high watermark committed for this
+      batch. Also fails when POLICY_CURATED_LOAD was not committed for the batch —
+      it was never promoted to curated, or a later batch has since moved the
+      watermark on.
     test_type: SQL_ROWCOUNT
     scope: INCREMENTAL
     entity: Policy
@@ -376,15 +508,111 @@ test_cases:
     validation_sql: |
       SELECT T.POLICY_ID AS BUSINESS_KEY,
              'RECORD_EFFECTIVE_TS' AS COLUMN_NAME,
-             TO_VARCHAR(W.PREVIOUS_WATERMARK) || ' .. ' || TO_VARCHAR(W.BATCH_HIGH_WATERMARK) AS EXPECTED_VALUE,
+             COALESCE('after ' || TO_VARCHAR(W.PREVIOUS_WATERMARK), 'no lower bound')
+                 || ', up to ' || TO_VARCHAR(W.BATCH_HIGH_WATERMARK) AS EXPECTED_VALUE,
              TO_VARCHAR(T.RECORD_EFFECTIVE_TS) AS ACTUAL_VALUE,
-             'Record sits outside the committed incremental window' AS FAILURE_REASON
+             CASE WHEN T.RECORD_EFFECTIVE_TS <= W.PREVIOUS_WATERMARK
+                  THEN 'Not newer than the previous batch''s watermark: already-processed data sent again'
+                  ELSE 'Later than the high watermark committed for the batch'
+             END AS FAILURE_REASON
       FROM TRN_POLICY T
-      CROSS JOIN DQ_WATERMARK W
-      WHERE W.PROCESS_NAME = 'POLICY_CURATED_LOAD'
-        AND T.BATCH_ID = :batch_id
-        AND (T.RECORD_EFFECTIVE_TS < W.PREVIOUS_WATERMARK
+      JOIN DQ_WATERMARK W
+        ON W.PROCESS_NAME = 'POLICY_CURATED_LOAD' AND W.LAST_BATCH_ID = T.BATCH_ID
+      WHERE T.BATCH_ID = :batch_id
+        AND (T.RECORD_EFFECTIVE_TS <= W.PREVIOUS_WATERMARK
              OR T.RECORD_EFFECTIVE_TS > W.BATCH_HIGH_WATERMARK)
+      UNION ALL
+      SELECT :batch_id AS BUSINESS_KEY,
+             'LAST_BATCH_ID' AS COLUMN_NAME,
+             :batch_id AS EXPECTED_VALUE,
+             COALESCE(MAX(W.LAST_BATCH_ID), '<no watermark>') AS ACTUAL_VALUE,
+             'The POLICY_CURATED_LOAD watermark was not committed for this batch' AS FAILURE_REASON
+      FROM TRN_POLICY T
+      LEFT JOIN DQ_WATERMARK W ON W.PROCESS_NAME = 'POLICY_CURATED_LOAD'
+      WHERE T.BATCH_ID = :batch_id
+      HAVING MAX(CASE WHEN W.LAST_BATCH_ID = :batch_id THEN 1 ELSE 0 END) = 0
+
+  - folder: /Incremental
+    name: Incremental claim watermark boundary
+    description: >-
+      Every claim record the batch loaded must be newer than the
+      previous batch's high watermark (otherwise already-processed data was
+      sent again) and no later than the high watermark committed for this
+      batch. Also fails when CLAIM_CURATED_LOAD was not committed for the batch —
+      it was never promoted to curated, or a later batch has since moved the
+      watermark on.
+    test_type: SQL_ROWCOUNT
+    scope: INCREMENTAL
+    entity: Claim
+    layer: Transformation
+    severity: Critical
+    validation_sql: |
+      SELECT T.CLAIM_ID AS BUSINESS_KEY,
+             'RECORD_EFFECTIVE_TS' AS COLUMN_NAME,
+             COALESCE('after ' || TO_VARCHAR(W.PREVIOUS_WATERMARK), 'no lower bound')
+                 || ', up to ' || TO_VARCHAR(W.BATCH_HIGH_WATERMARK) AS EXPECTED_VALUE,
+             TO_VARCHAR(T.RECORD_EFFECTIVE_TS) AS ACTUAL_VALUE,
+             CASE WHEN T.RECORD_EFFECTIVE_TS <= W.PREVIOUS_WATERMARK
+                  THEN 'Not newer than the previous batch''s watermark: already-processed data sent again'
+                  ELSE 'Later than the high watermark committed for the batch'
+             END AS FAILURE_REASON
+      FROM TRN_CLAIM T
+      JOIN DQ_WATERMARK W
+        ON W.PROCESS_NAME = 'CLAIM_CURATED_LOAD' AND W.LAST_BATCH_ID = T.BATCH_ID
+      WHERE T.BATCH_ID = :batch_id
+        AND (T.RECORD_EFFECTIVE_TS <= W.PREVIOUS_WATERMARK
+             OR T.RECORD_EFFECTIVE_TS > W.BATCH_HIGH_WATERMARK)
+      UNION ALL
+      SELECT :batch_id AS BUSINESS_KEY,
+             'LAST_BATCH_ID' AS COLUMN_NAME,
+             :batch_id AS EXPECTED_VALUE,
+             COALESCE(MAX(W.LAST_BATCH_ID), '<no watermark>') AS ACTUAL_VALUE,
+             'The CLAIM_CURATED_LOAD watermark was not committed for this batch' AS FAILURE_REASON
+      FROM TRN_CLAIM T
+      LEFT JOIN DQ_WATERMARK W ON W.PROCESS_NAME = 'CLAIM_CURATED_LOAD'
+      WHERE T.BATCH_ID = :batch_id
+      HAVING MAX(CASE WHEN W.LAST_BATCH_ID = :batch_id THEN 1 ELSE 0 END) = 0
+
+  - folder: /Incremental
+    name: Incremental customer watermark boundary
+    description: >-
+      Every customer record the batch loaded must be newer than the
+      previous batch's high watermark (otherwise already-processed data was
+      sent again) and no later than the high watermark committed for this
+      batch. Also fails when CUSTOMER_CURATED_LOAD was not committed for the batch —
+      it was never promoted to curated, or a later batch has since moved the
+      watermark on.
+    test_type: SQL_ROWCOUNT
+    scope: INCREMENTAL
+    entity: Customer
+    layer: Transformation
+    severity: Critical
+    validation_sql: |
+      SELECT T.CUSTOMER_ID AS BUSINESS_KEY,
+             'RECORD_EFFECTIVE_TS' AS COLUMN_NAME,
+             COALESCE('after ' || TO_VARCHAR(W.PREVIOUS_WATERMARK), 'no lower bound')
+                 || ', up to ' || TO_VARCHAR(W.BATCH_HIGH_WATERMARK) AS EXPECTED_VALUE,
+             TO_VARCHAR(T.RECORD_EFFECTIVE_TS) AS ACTUAL_VALUE,
+             CASE WHEN T.RECORD_EFFECTIVE_TS <= W.PREVIOUS_WATERMARK
+                  THEN 'Not newer than the previous batch''s watermark: already-processed data sent again'
+                  ELSE 'Later than the high watermark committed for the batch'
+             END AS FAILURE_REASON
+      FROM TRN_CUSTOMER T
+      JOIN DQ_WATERMARK W
+        ON W.PROCESS_NAME = 'CUSTOMER_CURATED_LOAD' AND W.LAST_BATCH_ID = T.BATCH_ID
+      WHERE T.BATCH_ID = :batch_id
+        AND (T.RECORD_EFFECTIVE_TS <= W.PREVIOUS_WATERMARK
+             OR T.RECORD_EFFECTIVE_TS > W.BATCH_HIGH_WATERMARK)
+      UNION ALL
+      SELECT :batch_id AS BUSINESS_KEY,
+             'LAST_BATCH_ID' AS COLUMN_NAME,
+             :batch_id AS EXPECTED_VALUE,
+             COALESCE(MAX(W.LAST_BATCH_ID), '<no watermark>') AS ACTUAL_VALUE,
+             'The CUSTOMER_CURATED_LOAD watermark was not committed for this batch' AS FAILURE_REASON
+      FROM TRN_CUSTOMER T
+      LEFT JOIN DQ_WATERMARK W ON W.PROCESS_NAME = 'CUSTOMER_CURATED_LOAD'
+      WHERE T.BATCH_ID = :batch_id
+      HAVING MAX(CASE WHEN W.LAST_BATCH_ID = :batch_id THEN 1 ELSE 0 END) = 0
 
   - folder: /Incremental
     name: Watermark status report
@@ -405,30 +633,121 @@ test_cases:
   - folder: /Historical
     name: Historical policy reconciliation (date range)
     description: >-
-      Re-reconciles transformation against curated for records effective in a
-      chosen date window. Set history_start / history_end when running it —
-      this is the late-arriving-change check.
+      For policies effective in a chosen date window, curated must hold
+      the most recent version any batch delivered. Several batches can carry
+      the same policy; the latest by effective time is the expected
+      value, so an older file loaded after a newer one (a late-arriving
+      change applied out of order) shows up here. Set history_start /
+      history_end when running it.
     test_type: SOURCE_TARGET_COMPARE
     scope: HISTORICAL
     entity: Policy
     layer: Curated
     severity: High
     key_columns: POLICY_ID
-    compare_columns: POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT
+    compare_columns: CUSTOMER_ID, POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT
     param_defaults:
       history_start: '2026-07-01'
       history_end: '2026-12-31'
     source_sql: |
-      SELECT POLICY_ID,
-             POLICY_TYPE_DESC   AS POLICY_TYPE,
-             POLICY_STATUS_DESC AS POLICY_STATUS,
-             PREMIUM_AMOUNT
-      FROM TRN_POLICY
-      WHERE RECORD_EFFECTIVE_TS >= :history_start
+      SELECT POLICY_ID, CUSTOMER_ID, POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT
+      FROM (
+          SELECT POLICY_ID,
+                 CUSTOMER_ID,
+                 POLICY_TYPE_DESC AS POLICY_TYPE,
+                 POLICY_STATUS_DESC AS POLICY_STATUS,
+                 PREMIUM_AMOUNT,
+                 RECORD_EFFECTIVE_TS,
+                 ROW_NUMBER() OVER (PARTITION BY POLICY_ID
+                                    ORDER BY RECORD_EFFECTIVE_TS DESC, BATCH_ID DESC) AS VERSION_RANK
+          FROM TRN_POLICY
+      ) LATEST
+      WHERE VERSION_RANK = 1
+        AND RECORD_EFFECTIVE_TS >= :history_start
         AND RECORD_EFFECTIVE_TS <  DATEADD(day, 1, :history_end)
     target_sql: |
-      SELECT POLICY_ID, POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT
+      SELECT POLICY_ID, CUSTOMER_ID, POLICY_TYPE, POLICY_STATUS, PREMIUM_AMOUNT
       FROM POLICY_MASTER
+      WHERE LAST_UPDATED_TS >= :history_start
+        AND LAST_UPDATED_TS <  DATEADD(day, 1, :history_end)
+
+  - folder: /Historical
+    name: Historical claim reconciliation (date range)
+    description: >-
+      For claims effective in a chosen date window, curated must hold
+      the most recent version any batch delivered. Several batches can carry
+      the same claim; the latest by effective time is the expected
+      value, so an older file loaded after a newer one (a late-arriving
+      change applied out of order) shows up here. Set history_start /
+      history_end when running it.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: HISTORICAL
+    entity: Claim
+    layer: Curated
+    severity: High
+    key_columns: CLAIM_ID
+    compare_columns: POLICY_ID, CLAIM_STATUS, CLAIM_AMOUNT, APPROVED_AMOUNT
+    param_defaults:
+      history_start: '2026-07-01'
+      history_end: '2026-12-31'
+    source_sql: |
+      SELECT CLAIM_ID, POLICY_ID, CLAIM_STATUS, CLAIM_AMOUNT, APPROVED_AMOUNT
+      FROM (
+          SELECT CLAIM_ID,
+                 POLICY_ID,
+                 CLAIM_STATUS_DESC AS CLAIM_STATUS,
+                 CLAIM_AMOUNT,
+                 APPROVED_AMOUNT,
+                 RECORD_EFFECTIVE_TS,
+                 ROW_NUMBER() OVER (PARTITION BY CLAIM_ID
+                                    ORDER BY RECORD_EFFECTIVE_TS DESC, BATCH_ID DESC) AS VERSION_RANK
+          FROM TRN_CLAIM
+      ) LATEST
+      WHERE VERSION_RANK = 1
+        AND RECORD_EFFECTIVE_TS >= :history_start
+        AND RECORD_EFFECTIVE_TS <  DATEADD(day, 1, :history_end)
+    target_sql: |
+      SELECT CLAIM_ID, POLICY_ID, CLAIM_STATUS, CLAIM_AMOUNT, APPROVED_AMOUNT
+      FROM CLAIM_MASTER
+      WHERE LAST_UPDATED_TS >= :history_start
+        AND LAST_UPDATED_TS <  DATEADD(day, 1, :history_end)
+
+  - folder: /Historical
+    name: Historical customer reconciliation (date range)
+    description: >-
+      For customers effective in a chosen date window, curated must hold
+      the most recent version any batch delivered. Several batches can carry
+      the same customer; the latest by effective time is the expected
+      value, so an older file loaded after a newer one (a late-arriving
+      change applied out of order) shows up here. Set history_start /
+      history_end when running it.
+    test_type: SOURCE_TARGET_COMPARE
+    scope: HISTORICAL
+    entity: Customer
+    layer: Curated
+    severity: High
+    key_columns: CUSTOMER_ID
+    compare_columns: CUSTOMER_NAME, EMAIL
+    param_defaults:
+      history_start: '2026-07-01'
+      history_end: '2026-12-31'
+    source_sql: |
+      SELECT CUSTOMER_ID, CUSTOMER_NAME, EMAIL
+      FROM (
+          SELECT CUSTOMER_ID,
+                 CUSTOMER_NAME,
+                 EMAIL,
+                 RECORD_EFFECTIVE_TS,
+                 ROW_NUMBER() OVER (PARTITION BY CUSTOMER_ID
+                                    ORDER BY RECORD_EFFECTIVE_TS DESC, BATCH_ID DESC) AS VERSION_RANK
+          FROM TRN_CUSTOMER
+      ) LATEST
+      WHERE VERSION_RANK = 1
+        AND RECORD_EFFECTIVE_TS >= :history_start
+        AND RECORD_EFFECTIVE_TS <  DATEADD(day, 1, :history_end)
+    target_sql: |
+      SELECT CUSTOMER_ID, CUSTOMER_NAME, EMAIL
+      FROM CUSTOMER_360
       WHERE LAST_UPDATED_TS >= :history_start
         AND LAST_UPDATED_TS <  DATEADD(day, 1, :history_end)
 

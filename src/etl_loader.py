@@ -13,7 +13,7 @@ from src.config import DEFAULT_BATCH_ID, SQL_DIR
 from src.connectors import get_connector
 
 
-def _script(name: str) -> str:
+def read_script(name: str) -> str:
     with open(os.path.join(SQL_DIR, name)) as f:
         return f.read()
 
@@ -22,7 +22,7 @@ def run_script(name: str, batch_id: str = DEFAULT_BATCH_ID, connector=None):
     own = connector is None
     conn = connector or get_connector()
     try:
-        return conn.run_script(_script(name), {"batch_id": batch_id})
+        return conn.run_script(read_script(name), {"batch_id": batch_id})
     finally:
         if own:
             conn.close()
@@ -33,8 +33,8 @@ def init_schema(connector=None):
     own = connector is None
     conn = connector or get_connector()
     try:
-        conn.run_script(_script("00_metadata_repository_ddl.sql"))
-        conn.run_script(_script("01_ddl_create_all_tables.sql"))
+        conn.run_script(read_script("00_metadata_repository_ddl.sql"))
+        conn.run_script(read_script("01_ddl_create_all_tables.sql"))
     finally:
         if own:
             conn.close()
@@ -100,3 +100,36 @@ def row_counts(connector=None, batch_id: str = DEFAULT_BATCH_ID) -> dict:
     finally:
         if own:
             conn.close()
+
+
+# Layer, table, and how to find the batch's rows in it. Curated tables have
+# no BATCH_ID (one row per key across all batches), so "in this batch" means
+# the keys the batch's transformation rows carry.
+PIPELINE_TABLES = [
+    ("Staging", "STG_CUSTOMER", "BATCH_ID = :batch_id"),
+    ("Staging", "STG_POLICY", "BATCH_ID = :batch_id"),
+    ("Staging", "STG_CLAIM", "BATCH_ID = :batch_id"),
+    ("Transformation", "TRN_CUSTOMER", "BATCH_ID = :batch_id"),
+    ("Transformation", "TRN_POLICY", "BATCH_ID = :batch_id"),
+    ("Transformation", "TRN_CLAIM", "BATCH_ID = :batch_id"),
+    ("Curated", "CUSTOMER_360",
+     "CUSTOMER_ID IN (SELECT CUSTOMER_ID FROM TRN_CUSTOMER WHERE BATCH_ID = :batch_id)"),
+    ("Curated", "POLICY_MASTER",
+     "POLICY_ID IN (SELECT POLICY_ID FROM TRN_POLICY WHERE BATCH_ID = :batch_id)"),
+    ("Curated", "CLAIM_MASTER",
+     "CLAIM_ID IN (SELECT CLAIM_ID FROM TRN_CLAIM WHERE BATCH_ID = :batch_id)"),
+]
+
+
+def record_counts(connector, batch_id: str = DEFAULT_BATCH_ID) -> list[dict]:
+    """
+    Rows in every pipeline table, in total and for `batch_id`, in one query:
+    [{"layer", "table", "total", "batch"}], in PIPELINE_TABLES order.
+    """
+    sql = "\nUNION ALL\n".join(
+        f"SELECT {i} AS N, (SELECT COUNT(*) FROM {table}) AS TOTAL_ROWS, "
+        f"(SELECT COUNT(*) FROM {table} WHERE {where}) AS BATCH_ROWS"
+        for i, (_, table, where) in enumerate(PIPELINE_TABLES))
+    rows = sorted(connector.query(sql, {"batch_id": batch_id}).rows)
+    return [{"layer": layer, "table": table, "total": int(total), "batch": int(batch)}
+            for (layer, table, _), (_, total, batch) in zip(PIPELINE_TABLES, rows)]
